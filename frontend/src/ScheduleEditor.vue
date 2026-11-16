@@ -84,7 +84,7 @@ async function save(enable: boolean) {
         <div v-if="draft.detection.method === 'meow'" class="field"><label id="schedule-tier">检测档位</label><ZSelect v-model="draft.detection.tier" :options="tiers" aria-labelledby="schedule-tier" :disabled="saving" /></div>
       </div>
       <p class="m-0 text-z-sm text-z-text-secondary">每账号 {{ sampleCount }} 个样本，本轮共 {{ sampleCount * draft.account_ids.length }} 个样本，真实调用计入所选 Key 用量<br>启用后立即检查首轮，全部账号结束后再计时；仅保存则保持停用</p>
-      <p class="m-0 text-z-xs text-z-text-secondary">{{ draft.detection.method === 'modeltrace' ? 'ModelTrace 第一候选与预期模型不同时告警' : 'Meow 使用预期模型作为对照基线，行为偏移时告警' }}<br>模型别名可选择对应的预期模型，证据不足不发送不匹配告警</p>
+      <p class="m-0 text-z-xs text-z-text-secondary">{{ draft.detection.method === 'modeltrace' ? 'ModelTrace 第一候选与预期模型不同时告警' : 'Meow 使用预期模型作为对照基线，行为偏移时告警' }}<br>模型别名可选择对应的预期模型，证据不足不发送不匹配告警<br>配置管理 API Key 后，不匹配账号会移出原分组，移入 GPT降智分组，并从本计划移除</p>
       <div class="flex flex-wrap justify-end gap-2"><ZButton :disabled="saving" @click="open=false">取消</ZButton><ZButton :disabled="!valid || saving" :loading="pending === 'save'" @click="save(false)">仅保存</ZButton><ZButton type="primary" :disabled="!valid || saving" :loading="pending === 'enable'" @click="save(true)">保存并启用</ZButton></div>
     </div>
   </ZDialog>

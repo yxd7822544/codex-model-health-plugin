@@ -50,7 +50,7 @@ struct GroupRef {
     id: String,
 }
 
-fn origin(value: &str) -> Result<String, PluginFault> {
+pub(crate) fn origin(value: &str) -> Result<String, PluginFault> {
     let address: SocketAddr = value
         .trim()
         .trim_end_matches('/')

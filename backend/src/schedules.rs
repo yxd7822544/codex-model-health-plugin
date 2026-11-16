@@ -22,6 +22,8 @@ pub struct ScheduledRun {
     pub due_at: u64,
     pub expected_model: String,
     pub alert: Delivery,
+    #[serde(default, skip_serializing_if="Option::is_none")]
+    pub remediation: Option<crate::remediation::Action>,
     // 轮次进度落盘前保留记录，避免槽位回收后重复创建或提前计时
     #[serde(default)]
     pub awaiting_checkpoint: bool,
@@ -94,14 +96,8 @@ async fn read(host: &HostClient) -> Result<(Vec<Schedule>, Option<u64>), PluginF
     .await?;
     match result.record {
         Some(record) => {
-            let mut items: Vec<Schedule> = serde_json::from_value(record.value)
+            let items: Vec<Schedule> = serde_json::from_value(record.value)
                 .map_err(|_| invalid("定时任务状态格式错误"))?;
-            // 已部署的单账号计划继续使用原账号，不改写其检测历史
-            for item in &mut items {
-                if item.account_ids.is_empty() {
-                    item.account_ids.push(item.detection.account_id.clone());
-                }
-            }
             Ok((items, Some(record.version)))
         }
         None => Ok((vec![], None)),
@@ -161,7 +157,7 @@ pub(crate) async fn list(service: &Service, host: &HostClient) -> Result<Value, 
         output.push(value);
     }
     let items=output;
-    Ok(json!({"schedules":items,"alerts_configured":service.alerts.configured()}))
+    Ok(json!({"schedules":items,"alerts_configured":service.alerts.configured(),"remediation_configured":service.remediation.configured()}))
 }
 
 pub(crate) async fn save(
@@ -282,6 +278,7 @@ pub(crate) async fn control(
     }
     match input.action.as_str() {
         "enable" => {
+            if item.account_ids.is_empty() {return Err(invalid("请先编辑计划并选择检测账号"));}
             if !item.enabled {
                 item.enabled = true;
                 item.next_run_at = if unfinished(item, &management::histories(host).await?) {
@@ -420,6 +417,7 @@ pub(crate) async fn tick(service: &Service, host: &HostClient) -> Result<(), Plu
                 due_at: round.due_at,
                 expected_model: item.expected_model.clone(),
                 alert: Delivery::default(),
+                remediation: Some(crate::remediation::Action::default()),
                 awaiting_checkpoint: true,
             };
             let mut detection = item.detection.clone();
@@ -484,6 +482,20 @@ async fn finish_paused(service: &Service, host: &HostClient) -> Result<(), Plugi
         scheduled.alert.status = DeliveryStatus::NotRequired;
         host::write(host, &run, Some(version)).await?;
     }
+    Ok(())
+}
+
+pub(crate) async fn remove_account(service:&Service,host:&HostClient,schedule_id:&str,account_id:&str)->Result<(),PluginFault> {
+    let _guard=service.schedules.lock().await;
+    let (mut items,version)=read(host).await?;
+    let Some(item)=items.iter_mut().find(|item|item.id==schedule_id) else {return Ok(())};
+    let count=item.account_ids.len();
+    item.account_ids.retain(|id|id!=account_id);
+    if item.account_ids.len()==count {return Ok(())}
+    if let Some(first)=item.account_ids.first() {item.detection.account_id=first.clone();}
+    if item.account_ids.is_empty() {item.enabled=false;item.next_run_at=None;item.error=Some("检测账号已全部移至 GPT降智分组，计划已停用".into());}
+    item.revision+=1;
+    write(host,&items,version).await?;
     Ok(())
 }
 

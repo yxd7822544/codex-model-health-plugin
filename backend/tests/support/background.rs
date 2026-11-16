@@ -548,6 +548,124 @@ async fn manual_modeltrace_short_sample_still_requires_resume() {
 }
 
 #[tokio::test]
+async fn mismatched_accounts_join_group_and_reduce_only_the_originating_schedule() {
+    let mut peer=Peer::configured(json!({"hostAdminApiKey":"fixture-admin"})).await;
+    let mut host=Host {numeric_answer:true,account_groups:[("account-a".into(),vec!["original-a".into()]),("account-b".into(),vec!["original-b".into()])].into(),..Default::default()};
+    let item=batch_schedule(&mut peer,&mut host).await;
+    let mut other=batch_input();other["name"]=json!("另一计划");
+    peer.api("api/schedules/save",Some(other),&mut host).await.unwrap();
+    let mut bg=Background::new(peer,3_600_000).await;
+    bg.until(&mut host,|h|h.state.len()==2 && h.state.values().all(|(r,_)|r["scheduled"]["remediation"]["status"]=="succeeded")).await;
+    let list=bg.api("api/schedules",None,&mut host).await.unwrap();
+    let schedule=list["schedules"].as_array().unwrap().iter().find(|s|s["id"]==item["id"]).unwrap();
+    assert_eq!(schedule["account_ids"],json!([]));assert_eq!(schedule["enabled"],false);assert!(schedule["next_run_at"].is_null());
+    assert_eq!(schedule["round"]["members"].as_array().unwrap().len(),2);
+    assert_eq!(list["schedules"][1]["account_ids"],json!(["account-a","account-b"]));
+    for (id,original) in [("account-a","original-a"),("account-b","original-b")] {
+        assert_eq!(host.account_groups[id],vec!["group-downgraded"]);
+        let run=&host.state.values().find(|(r,_)|r["account_id"]==id).unwrap().0;
+        assert_eq!(run["scheduled"]["remediation"]["original_group_ids"],json!([original]));
+    }
+    assert_eq!(host.remediation_posts.len(),2);assert!(host.notifications.is_empty());assert_eq!(host.executions.len(),6);
+    drop(bg.cancel(&mut host).await);
+    let mut peer=Peer::configured(json!({"hostAdminApiKey":"fixture-admin"})).await;
+    let list=peer.api("api/schedules",None,&mut host).await.unwrap();assert_eq!(list["schedules"][0]["account_ids"],json!([]));
+    assert!(peer.api("api/schedules/control",Some(json!({"id":item["id"],"revision":schedule["revision"],"action":"enable"})),&mut host).await.is_err());
+    let mut bg=Background::new(peer,3_600_000).await;bg.api("api/schedules",None,&mut host).await.unwrap();assert_eq!(host.remediation_posts.len(),2);bg.cancel(&mut host).await;
+}
+
+#[tokio::test]
+async fn match_insufficient_and_failed_runs_never_change_account_groups() {
+    for scenario in ["match","insufficient","failed"] {
+        let mut peer=Peer::configured(json!({"hostAdminApiKey":"fixture-admin"})).await;
+        let mut host=Host {numeric_answer:true,..Default::default()};
+        if scenario=="insufficient" {host.numeric_counts=vec![51;5].into();}
+        if scenario=="failed" {host.execute_error=Some(PluginFault::new(ErrorCode::Timeout,"fixture timeout"));}
+        let item=scheduled(&mut peer,&mut host).await;
+        peer.api("api/schedules/control",Some(json!({"id":item["id"],"revision":1,"action":"enable"})),&mut host).await.unwrap();
+        let mut bg=Background::new(peer,3_600_000).await;
+        bg.until(&mut host,|h|h.state.values().any(|(r,_)|matches!(r["status"].as_str(),Some("completed"|"stopped"|"paused")))).await;
+        if scenario=="match" {let run=&mut host.state.values_mut().next().unwrap().0;run["scheduled"]["expected_model"]=run["report"]["analysis"]["results"][0]["model"].clone();}
+        bg.until(&mut host,|h|h.state.values().all(|(r,_)|r["scheduled"]["remediation"]["status"]=="not_required")).await;
+        assert!(host.remediation_requests.is_empty());assert_eq!(host.schedules["items"].0[0]["account_ids"],json!(["account-b"]));
+        bg.cancel(&mut host).await;
+    }
+}
+
+#[tokio::test]
+async fn confirmed_group_change_retries_schedule_save_without_duplicate_group_mutation() {
+    let mut peer=Peer::configured(json!({"hostAdminApiKey":"fixture-admin"})).await;
+    let mut host=Host {numeric_answer:true,..Default::default()};batch_schedule(&mut peer,&mut host).await;host.reject_prune_once=true;
+    let mut bg=Background::new(peer,3_600_000).await;
+    bg.until(&mut host,|h|h.state.values().any(|(r,_)|r["scheduled"]["remediation"]["error"]=="fixture schedule pruning failed")).await;
+    assert_eq!(host.remediation_posts.len(),1);assert_eq!(host.schedules["items"].0[0]["account_ids"],json!(["account-a","account-b"]));
+    let id=host.state.values().find(|(r,_)|r["scheduled"]["remediation"]["error"].is_string()).unwrap().0["id"].clone();
+    for (run,_) in host.state.values_mut() {if run["id"]==id {run["scheduled"]["remediation"]["next_attempt_at"]=json!(0);}}
+    bg.until(&mut host,|h|saved(h,&id)["scheduled"]["remediation"]["status"]=="succeeded").await;
+    assert_eq!(host.remediation_posts.len(),1);
+    assert_eq!(host.schedules["items"].0[0]["account_ids"],json!(["account-b"]));bg.cancel(&mut host).await;
+}
+
+#[tokio::test]
+async fn ambiguous_move_and_restart_finish_once_without_repeating_group_changes() {
+    for mode in ["lost_response","state_commit_failed","already_target"] {
+        let mut peer=Peer::configured(json!({"hostAdminApiKey":"fixture-admin"})).await;
+        let mut host=Host {numeric_answer:true,..Default::default()};
+        host.account_groups.insert("account-b".into(),vec![if mode=="already_target" {"group-downgraded".into()} else {"original-group".into()}]);
+        if mode=="lost_response" {host.remediation_statuses=vec![503].into();host.remediation_apply_then_fail=true;}
+        let item=scheduled(&mut peer,&mut host).await;
+        peer.api("api/schedules/control",Some(json!({"id":item["id"],"revision":1,"action":"enable"})),&mut host).await.unwrap();
+        if mode=="state_commit_failed" {host.reject_remediation_commit_once=true;}
+        let mut bg=Background::new(peer,3_600_000).await;
+        if mode=="state_commit_failed" {
+            assert!(bg.finish(&mut host).await.is_err());drop(bg);
+            host.state.values_mut().next().unwrap().0["scheduled"]["remediation"]["next_attempt_at"]=json!(0);
+            bg=Background::new(Peer::configured(json!({"hostAdminApiKey":"fixture-admin"})).await,3_600_000).await;
+        } else if mode=="lost_response" {
+            bg.until(&mut host,|h|h.state.values().any(|(r,_)|r["scheduled"]["remediation"]["error"].is_string())).await;
+            assert_eq!(host.schedules["items"].0[0]["account_ids"],json!(["account-b"]));
+            host.state.values_mut().next().unwrap().0["scheduled"]["remediation"]["next_attempt_at"]=json!(0);
+        }
+        bg.until(&mut host,|h|h.state.len()==1 && h.state.values().all(|(r,_)|r["scheduled"]["remediation"]["status"]=="succeeded")).await;
+        assert_eq!(host.account_groups["account-b"],vec!["group-downgraded"]);
+        assert_eq!(host.remediation_posts.len(),if mode=="already_target" {0} else {1});
+        assert_eq!(host.schedules["items"].0[0]["account_ids"],json!([]));
+        assert_eq!(host.state.values().next().unwrap().0["scheduled"]["remediation"]["original_group_ids"],json!([if mode=="already_target" {"group-downgraded"} else {"original-group"}]));
+        assert_eq!(host.executions.len(),3);bg.cancel(&mut host).await;
+    }
+}
+
+#[tokio::test]
+async fn old_reports_and_replaced_account_identities_never_trigger_auto_move() {
+    for mode in ["old_report","replaced_identity","missing_group"] {
+        let mut peer=Peer::configured(json!({"hostAdminApiKey":"fixture-admin"})).await;
+        let mut host=Host {numeric_answer:true,..Default::default()};let item=scheduled(&mut peer,&mut host).await;
+        peer.api("api/schedules/control",Some(json!({"id":item["id"],"revision":1,"action":"enable"})),&mut host).await.unwrap();let mut bg=Background::new(peer,3_600_000).await;
+        bg.until(&mut host,|h|h.state.values().any(|(r,_)|r["status"]=="completed")).await;
+        if mode=="old_report" {host.state.values_mut().next().unwrap().0["scheduled"].as_object_mut().unwrap().remove("remediation");}
+        if mode=="replaced_identity" {host.account_patch=Some(json!({"upstream_account_id":"different-account"}));}
+        if mode=="missing_group" {host.group_pages=vec![vec![]];}
+        if mode=="old_report" {bg.api("api/schedules",None,&mut host).await.unwrap();}
+        else {bg.until(&mut host,|h|h.state.values().any(|(r,_)|r["scheduled"]["remediation"]["error"].is_string())).await;}
+        assert!(host.remediation_posts.is_empty());assert_eq!(host.schedules["items"].0[0]["account_ids"],json!(["account-b"]));
+        bg.cancel(&mut host).await;
+    }
+}
+
+#[tokio::test]
+async fn group_mutation_failure_retains_schedule_and_stops_after_three_attempts() {
+    let mut peer=Peer::configured(json!({"hostAdminApiKey":"fixture-admin"})).await;
+    let mut host=Host {numeric_answer:true,remediation_statuses:vec![503;3].into(),..Default::default()};let item=scheduled(&mut peer,&mut host).await;
+    peer.api("api/schedules/control",Some(json!({"id":item["id"],"revision":1,"action":"enable"})),&mut host).await.unwrap();let mut bg=Background::new(peer,3_600_000).await;
+    for attempt in 1..=3 {
+        bg.until(&mut host,|h|h.state.values().any(|(r,_)|r["scheduled"]["remediation"]["attempts"]==attempt && r["scheduled"]["remediation"]["status"]!="moving")).await;
+        if attempt<3 {host.state.values_mut().next().unwrap().0["scheduled"]["remediation"]["next_attempt_at"]=json!(0);}
+    }
+    assert_eq!(host.remediation_posts.len(),3);assert_eq!(host.state.values().next().unwrap().0["scheduled"]["remediation"]["status"],"failed");
+    assert_eq!(host.schedules["items"].0[0]["account_ids"],json!(["account-b"]));assert!(host.account_groups.is_empty());assert_eq!(host.executions.len(),3);bg.cancel(&mut host).await;
+}
+
+#[tokio::test]
 async fn scheduled_short_samples_retry_within_budget_and_release_the_round() {
     for exhausted in [false, true] {
         let mut peer = Peer::new().await;

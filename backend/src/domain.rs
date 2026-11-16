@@ -133,7 +133,7 @@ impl Run {
         matches!(self.status, Status::Completed | Status::Stopped) && self.inflight.is_none()
     }
     pub fn replaceable(&self) -> bool {
-        self.finished() && self.scheduled.as_ref().is_none_or(|s| s.alert.done() && !s.awaiting_checkpoint)
+        self.finished() && self.scheduled.as_ref().is_none_or(|s| s.alert.done() && !s.awaiting_checkpoint && s.remediation.as_ref().is_none_or(|action|action.done()))
     }
     pub fn jobs(&self) -> &[Value] {
         self.plan["jobs"]
@@ -244,7 +244,7 @@ impl Run {
             "attempts":self.attempts.len(),"planned":self.jobs().len(),"report":self.report,
             "background":self.background,"queued_at":self.queued_at,"task_error":self.task_error,
             "data_error":self.data_error(),
-            "scheduled":self.scheduled.as_ref().map(|s|json!({"schedule_id":s.schedule_id,"name":s.name,"due_at":s.due_at,"expected_model":s.expected_model,"alert":s.alert}))})
+            "scheduled":self.scheduled.as_ref().map(|s|json!({"schedule_id":s.schedule_id,"name":s.name,"due_at":s.due_at,"expected_model":s.expected_model,"alert":s.alert,"remediation":s.remediation}))})
     }
 }
 

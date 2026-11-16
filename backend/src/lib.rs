@@ -7,6 +7,7 @@ mod host;
 mod history;
 mod management;
 mod runner;
+mod remediation;
 mod schedules;
 mod updates;
 
@@ -33,6 +34,7 @@ pub(crate) struct Service {
     alerts: alerts::Settings,
     host_api_base_url: String,
     history: Mutex<history::Archive>,
+    remediation: remediation::Settings,
 }
 pub fn plugin(engine: engine::Engine) -> Result<ComposedPlugin, AuthorError> {
     plugin_with_configuration(engine, &serde_json::json!({}))
@@ -51,6 +53,7 @@ pub fn plugin_with_configuration(
         alerts: alerts::Settings::from_configuration(configuration),
         host_api_base_url: configuration["hostApiBaseUrl"].as_str().unwrap_or("http://127.0.0.1:8080").to_owned(),
         history: Mutex::new(history::Archive::default()),
+        remediation: remediation::Settings::new(configuration),
     });
     let maintenance = Arc::clone(&service);
     PluginBuilder::from_json(include_bytes!("../../plugin.json"))?

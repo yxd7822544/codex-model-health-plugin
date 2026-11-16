@@ -368,6 +368,12 @@ struct Host {
     group_requests: Vec<Value>,
     group_status: u16,
     group_account_requests: Vec<Value>,
+    remediation_requests: Vec<Value>,
+    remediation_posts: Vec<Value>,
+    remediation_statuses: VecDeque<u16>,
+    remediation_apply_then_fail: bool,
+    reject_prune_once: bool,
+    reject_remediation_commit_once: bool,
     repeat_cursor: bool,
     numeric_answer: bool,
     numeric_counts: VecDeque<usize>,
@@ -413,6 +419,31 @@ impl Host {
         let metadata = |value| Ok((value, vec![]));
         match method {
             "host.http.do_stream" => {
+                let request_headers:Vec<(String,Vec<u8>)>=serde_json::from_value(params["headers"].clone()).unwrap();
+                if request_headers.iter().any(|(name,_)|name=="x-api-key") {
+                    assert!(request_headers.contains(&("x-api-key".into(),b"fixture-admin".to_vec())));
+                    let url=params["url"].as_str().unwrap().to_owned();assert!(url.starts_with("http://127.0.0.1:8080/api/admin/"));
+                    self.remediation_requests.push(params.clone());
+                    let mut status=200;
+                    let data=if url.contains("/account-groups/options?") {
+                        let page:usize=url.split("page=").nth(1).unwrap().split('&').next().unwrap().parse().unwrap();
+                        json!({"items":self.group_pages.get(page-1).cloned().unwrap_or_else(||vec![json!({"id":"group-downgraded","name":"GPT降智分组","enabled":true})]),"page":{"page":page,"totalPages":self.group_pages.len().max(1)}})
+                    } else if url.contains("/accounts/detail?accountId=") {
+                        let id=url.split("accountId=").nth(1).unwrap();
+                        json!({"account":{"id":id,"provider":"openai","groups":self.account_groups.get(id).cloned().unwrap_or_default().iter().map(|id|json!({"id":id})).collect::<Vec<_>>()}})
+                    } else {
+                        assert!(url.ends_with("/accounts/batch-update"));assert_eq!(params["method"],"POST");
+                        let body:Value=serde_json::from_slice(&payload).unwrap();assert_eq!(body.as_object().unwrap().len(),2);
+                        self.remediation_posts.push(body.clone());status=self.remediation_statuses.pop_front().unwrap_or(200);
+                        if status==200 || self.remediation_apply_then_fail {
+                            let ids:Vec<String>=serde_json::from_value(body["groupIds"].clone()).unwrap();
+                            for account in body["accountIds"].as_array().unwrap() {self.account_groups.insert(account.as_str().unwrap().to_owned(),ids.clone());}
+                        }
+                        json!({"updated":1})
+                    };
+                    self.http_body=Some(serde_json::to_vec(&json!({"code":if status==200 {200} else {50001},"data":data})).unwrap());
+                    return metadata(json!({"status":status,"http_version":"HTTP/1.1","headers":[],"stream":"github","trailers":[]}));
+                }
                 if params["url"].as_str().unwrap().starts_with("http://127.0.0.1:8080/api/admin/account-groups/options?") {
                     assert_eq!(params["method"], "GET");
                     assert!(payload.is_empty());
@@ -558,6 +589,12 @@ impl Host {
                 metadata(json!({"record":record}))
             }
             "host.state.put" => {
+                if self.reject_prune_once && params["namespace"]=="schedules" && params["value"][0]["account_ids"].as_array().is_some_and(|ids|ids.len()<2) {
+                    self.reject_prune_once=false;return Err(PluginFault::new(ErrorCode::Fault,"fixture schedule pruning failed"));
+                }
+                if self.reject_remediation_commit_once && params["namespace"]=="runs" && params["value"]["scheduled"]["remediation"]["status"]=="succeeded" {
+                    self.reject_remediation_commit_once=false;return Err(PluginFault::new(ErrorCode::Fault,"fixture remediation status failed"));
+                }
                 if params["namespace"].as_str().unwrap().starts_with("history-") {
                     if self.reject_archive_write {return Err(PluginFault::new(ErrorCode::Fault,"fixture archive unavailable"));}
                     let key=params["key"].as_str().unwrap().to_owned();

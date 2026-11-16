@@ -110,6 +110,7 @@ async fn cycle(service: &Service, host: &HostClient) -> Result<(), PluginFault> 
             return Ok(());
         }
         crate::schedules::tick(service, host).await?;
+        crate::remediation::apply_pending(service, host).await?;
         crate::alerts::deliver_pending(service, host).await?;
         // Notify retains an enqueue that arrives between reading state and waiting.
         let next = {

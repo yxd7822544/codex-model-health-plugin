@@ -112,7 +112,7 @@ export function installPreview() {
         refreshRound(item)
         if (item.enabled && item.next_run_at!==null && item.next_run_at<=Date.now()) await beginRound(item)
       }
-      return respond({schedules,alerts_configured:params.get('alerts') !== 'missing'})
+      return respond({schedules,alerts_configured:params.get('alerts') !== 'missing',remediation_configured:false})
     }
     if (input.path === 'api/schedules/save') {
       const existing=schedules.find(s=>s.id===data.id)
