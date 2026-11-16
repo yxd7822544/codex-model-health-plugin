@@ -1,10 +1,14 @@
 //! 定时检测不符合预期时移入指定分组，并更新该计划的后续账号名单。
 use crate::{
-    Service, account_groups, alerts,
+    Service, alerts,
     domain::{Run, Status as RunStatus},
     host, invalid, management, now_ms, schedules,
 };
-use gateway_plugin_sdk::{PluginFault, call::host::HttpRequest, client::HostClient};
+use gateway_plugin_sdk::{
+    PluginFault,
+    call::middleware::{MiddlewareHeader, http::Version},
+    client::{HostClient, HttpBody, HttpFrame, HttpRequest},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, time::Duration};
@@ -68,7 +72,6 @@ async fn api(
     path: &str,
     body: Option<Value>,
 ) -> Result<Value, PluginFault> {
-    let base = account_groups::origin(&service.host_api_base_url)?;
     let mut headers = vec![
         (
             "x-api-key".into(),
@@ -83,16 +86,24 @@ async fn api(
         vec![]
     };
     let mut response = client
-        .http(
-            HttpRequest {
-                method: method.into(),
-                url: format!("{base}{path}"),
-                headers,
+        .dispatch_http(HttpRequest {
+            settings: Value::Null,
+            method: method.into(),
+            uri: path.into(),
+            version: Version::Http11,
+            headers: headers
+                .into_iter()
+                .map(|(name, value)| MiddlewareHeader { name, value })
+                .collect(),
+            timeout_ms: Some(15_000),
+            body: if body.is_empty() {
+                HttpBody::empty()
+            } else {
+                HttpBody::from_bytes(body)
             },
-            body,
-        )
+        })
         .await
-        .map_err(|_| invalid("宿主改组接口请求失败"))?;
+        .map_err(|error| invalid(format!("宿主管理接口调用失败（{:?}）", error.code)))?;
     if response.status != 200 {
         let status = response.status;
         let _ = response.body.close().await;
@@ -100,11 +111,26 @@ async fn api(
             "宿主改组接口失败（HTTP {status}），请检查管理 API Key 和分组状态"
         )));
     }
-    let bytes = response
-        .body
-        .collect(1024 * 1024)
-        .await
-        .map_err(|_| invalid("宿主改组响应读取失败"))?;
+    let result = async {
+        let mut bytes = vec![];
+        while let Some(frame) = response
+            .body
+            .read()
+            .await
+            .map_err(|_| invalid("宿主改组响应读取失败"))?
+        {
+            if let HttpFrame::Data(chunk) = frame {
+                if chunk.len() > (1024 * 1024usize).saturating_sub(bytes.len()) {
+                    return Err(invalid("宿主改组响应超出限制"));
+                }
+                bytes.extend(chunk);
+            }
+        }
+        Ok(bytes)
+    }
+    .await;
+    let _ = response.body.close().await;
+    let bytes = result?;
     let value: Value =
         serde_json::from_slice(&bytes).map_err(|_| invalid("宿主改组响应格式错误"))?;
     if value["code"] != 200 {
@@ -185,20 +211,16 @@ async fn move_to_group(
                 .ok_or_else(|| invalid("账号分组 ID 无效"))
         })
         .collect::<Result<_, _>>()?;
-    {
-        let _state = service.state.lock().await;
-        let (mut current, version) = management::find(client, &run.id).await?;
-        let action = current
-            .scheduled
-            .as_mut()
-            .unwrap()
-            .remediation
-            .as_mut()
-            .unwrap();
-        if action.original_group_ids.is_none() {
-            action.original_group_ids = Some(groups.iter().cloned().collect());
-            host::write(client, &current, Some(version)).await?;
-        }
+    let action = run
+        .scheduled
+        .as_mut()
+        .unwrap()
+        .remediation
+        .as_mut()
+        .unwrap();
+    if action.original_group_ids.is_none() {
+        action.original_group_ids = Some(groups.iter().cloned().collect());
+        save_action(service, client, run).await?;
     }
     // 只保留目标组；重试时已经完成移组则只修正计划，不再次修改账号。
     if groups != [target.clone()].into() {
@@ -246,10 +268,11 @@ pub(crate) async fn apply_pending(
         else {
             return Ok(());
         };
-        let invalid_report=run.data_error().is_some();
+        let invalid_report = run.data_error().is_some();
         let scheduled = run.scheduled.as_mut().unwrap();
         let action = scheduled.remediation.as_mut().unwrap();
-        if invalid_report || run.status != RunStatus::Completed
+        if invalid_report
+            || run.status != RunStatus::Completed
             || run.task_error.is_some()
             || alerts::mismatch(&run.report, &scheduled.expected_model).is_none()
         {
@@ -261,7 +284,7 @@ pub(crate) async fn apply_pending(
             action.status = Status::Failed;
             action
                 .error
-                .get_or_insert_with(|| "自动改组已达到 3 次尝试上限，请检查配置后重新检测".into());
+                .get_or_insert_with(|| "自动改组已达到 3 次尝试上限，请检查配置后重试改组".into());
             host::write(client, &run, Some(version)).await?;
             return Ok(());
         }
@@ -271,7 +294,35 @@ pub(crate) async fn apply_pending(
         host::write(client, &run, Some(version)).await?;
         run
     };
-    let mut snapshot = claimed;
+    process(service, client, claimed, false).await.map(|_| ())
+}
+
+async fn save_action(service: &Service, client: &HostClient, run: &Run) -> Result<(), PluginFault> {
+    let _state = service.state.lock().await;
+    let action = run
+        .scheduled
+        .as_ref()
+        .and_then(|s| s.remediation.clone())
+        .ok_or_else(|| invalid("缺少自动改组状态"))?;
+    if let Some((mut current, version)) = host::read(client, run.slot).await? {
+        if current.id == run.id {
+            current
+                .scheduled
+                .as_mut()
+                .ok_or_else(|| invalid("缺少定时检测信息"))?
+                .remediation = Some(action);
+            return host::write(client, &current, Some(version)).await;
+        }
+    }
+    crate::history::set_remediation(service, client, &run.id, action).await
+}
+
+async fn process(
+    service: &Service,
+    client: &HostClient,
+    mut snapshot: Run,
+    explicit_retry: bool,
+) -> Result<Run, PluginFault> {
     let result = tokio::time::timeout(
         Duration::from_secs(15),
         move_to_group(service, client, &mut snapshot),
@@ -289,9 +340,7 @@ pub(crate) async fn apply_pending(
         .map(|_| group),
         Err(error) => Err(error),
     };
-    let _state = service.state.lock().await;
-    let (mut run, version) = management::find(client, &snapshot.id).await?;
-    let action = run
+    let action = snapshot
         .scheduled
         .as_mut()
         .unwrap()
@@ -306,13 +355,63 @@ pub(crate) async fn apply_pending(
             action.error = None;
         }
         Err(error) => {
-            action.status = if action.attempts >= 3 || !service.remediation.configured() {
-                Status::Failed
-            } else {
-                Status::Pending
-            };
+            action.status =
+                if explicit_retry || action.attempts >= 3 || !service.remediation.configured() {
+                    Status::Failed
+                } else {
+                    Status::Pending
+                };
             action.error = Some(management::excerpt(&error.message));
         }
     }
-    host::write(client, &run, Some(version)).await
+    save_action(service, client, &snapshot).await?;
+    Ok(snapshot)
+}
+
+pub(crate) async fn retry(
+    service: &Service,
+    client: &HostClient,
+    id: &str,
+) -> Result<Run, PluginFault> {
+    let _execution = service.remediation.execution.lock().await;
+    if !service.remediation.configured() {
+        return Err(invalid("请先配置宿主管理 API Key"));
+    }
+    let mut run = match host::read(client, crate::domain::slot_from_id(id)?).await? {
+        Some((run, _)) if run.id == id => run,
+        _ => crate::history::find(service, client, id)
+            .await?
+            .ok_or_else(|| invalid("检测记录不存在或已超出历史保留范围"))?,
+    };
+    if !run.finished()
+        || run.status != RunStatus::Completed
+        || run.task_error.is_some()
+        || run.data_error().is_some()
+    {
+        return Err(invalid("只能重试完整完成且模型不匹配的检测记录"));
+    }
+    let scheduled = run
+        .scheduled
+        .as_mut()
+        .ok_or_else(|| invalid("该记录不是定时检测"))?;
+    if alerts::mismatch(&run.report, &scheduled.expected_model).is_none() {
+        return Err(invalid("该检测结果无需改组"));
+    }
+    let action = scheduled
+        .remediation
+        .as_mut()
+        .ok_or_else(|| invalid("该记录没有自动改组操作"))?;
+    if action.status != Status::Failed
+        && !(matches!(action.status, Status::Moving | Status::Pending)
+            && action.next_attempt_at <= now_ms())
+    {
+        return Err(invalid("仅可重试已失败的自动改组操作"));
+    }
+    // 显式重试只追加一次处理，不重跑检测，也不重置已记录的尝试次数。
+    action.attempts = action.attempts.saturating_add(1);
+    action.status = Status::Moving;
+    action.next_attempt_at = now_ms() + 60_000;
+    action.error = None;
+    save_action(service, client, &run).await?;
+    process(service, client, run, true).await
 }

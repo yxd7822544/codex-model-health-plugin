@@ -7,7 +7,7 @@ import { Play, Pause, Square, RefreshCw, FlaskConical, ArrowRight, Check, Finger
 import { api } from './api'
 import type { Bootstrap, Run, History, HistoryPage, Method } from './api'
 import { accountDisplayName } from './accountDisplay'
-import { alertStatusText, remediationStatusText, formatTime, methodText, runStatusText, tierText, verdict, tone, reasonText } from './presentation'
+import { alertStatusText, remediationStatusText, canRetryRemediation, formatTime, methodText, runStatusText, tierText, verdict, tone, reasonText } from './presentation'
 import SourceUpdates from './SourceUpdates.vue'
 import AttemptTable from './AttemptTable.vue'
 import SchedulePanel from './SchedulePanel.vue'
@@ -122,6 +122,11 @@ async function control(command: string) {
   schedulePoll(0)
 }
 async function openRun(id: string) { await operate(async () => { run.value = (await api<{run: Run}>('runs/get',{id})).run }); await nextTick(); reportSection.value?.scrollIntoView({block:'start',behavior:'smooth'}) }
+async function retryRemediation() {
+  if(!run.value) return
+  await operate(async()=>{run.value=(await api<{run:Run}>('runs/remediation/retry',{id:run.value!.id})).run;await loadHistory()})
+  schedulePoll(0)
+}
 async function showHistory(schedule: {id: string; name: string}) {historyFilter.value=schedule; await changeHistory(1); await nextTick(); historySection.value?.scrollIntoView({block:'start',behavior:'smooth'})}
 function visibility() { ++viewVersion; clearTimeout(pollTimer); if (document.visibilityState === 'visible') schedulePoll(0) }
 onMounted(() => { void load().finally(() => schedulePoll()); document.addEventListener('visibilitychange',visibility) })
@@ -179,7 +184,7 @@ onScopeDispose(() => { disposed=true; ++viewVersion; clearTimeout(pollTimer); do
         <p v-if="run.inflight" role="status" class="muted text-z-sm">当前题目正在请求中；结束或暂停会保留本题的用量与结果。</p>
         <p v-else-if="enqueued" role="status" class="muted text-z-sm">已加入后台队列，轮到本任务后自动执行；可以离开页面，稍后回来查看。</p>
         <p v-else-if="!finished" class="muted text-z-sm">{{ run.scheduled ? '本账号将结束本轮尝试，随后继续其他账号。' : '任务已暂停。点击“继续检测”后继续；服务或插件重启后需要手动继续。' }}</p>
-        <p v-if="lastError" class="sample-error" role="status">最近一次异常：{{ lastError }}</p><p v-if="finished && run.scheduled?.remediation" class="text-z-sm text-z-text-secondary">{{ remediationStatusText[run.scheduled.remediation.status] }}<span v-if="run.scheduled.remediation.error">：{{ run.scheduled.remediation.error }}</span></p>
+        <p v-if="lastError" class="sample-error" role="status">最近一次异常：{{ lastError }}</p><p v-if="finished && run.scheduled?.remediation" class="text-z-sm text-z-text-secondary">{{ remediationStatusText[run.scheduled.remediation.status] }}<span v-if="run.scheduled.remediation.error">：{{ run.scheduled.remediation.error }}</span> <ZButton v-if="canRetryRemediation(run.scheduled.remediation)" size="small" :disabled="action" :loading="action" @click="retryRemediation">重试改组</ZButton></p>
         <div class="flex flex-wrap justify-between items-center gap-3 mt-5 mb-4"><ZSegmented v-model="reportView" aria-label="报告视图" :options="[{value:'fingerprint',label:'指纹报告'},{value:'samples',label:'请求明细'}]" /><span class="muted text-z-xs">{{ formatTime(run.updated_at) }} 更新 · {{ run.key_name }}</span></div>
         <div v-if="reportView === 'fingerprint'" class="report-grid">
           <div><p class="text-z-sm font-emphasis mt-0">{{ traceReport ? '前 5 候选 · 库内相对概率' : '候选相对匹配度' }} <span class="muted font-normal">（不是正确率）</span></p><p v-if="!candidates.length" class="muted">还没有有效样本</p><div v-for="[name,value] in candidates" :key="name" class="candidate"><div class="flex justify-between gap-3 text-z-sm"><span class="break-all">{{ name === 'other_known_external' ? '其他 / 未建模行为' : name }}</span><span class="font-mono">{{ (value*100).toFixed(1) }}%</span></div><div class="candidate-track"><div :style="{width:`${Math.max(0,Math.min(100,value*100))}%`}" /></div><p v-if="run.report.method !== 'modeltrace'" class="muted text-z-xs mt-1 mb-0">判定阈值 {{ ((run.report.thresholds[name] ?? 0)*100).toFixed(1) }}%</p></div><div v-if="traceReport?.analysis" class="baseline-meta"><template v-for="family in traceReport.analysis.family_probabilities" :key="family.family"><span>{{ family.display_name }} 家族</span><strong>{{ (family.probability*100).toFixed(1) }}%</strong></template></div></div>

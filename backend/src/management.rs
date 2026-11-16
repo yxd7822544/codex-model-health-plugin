@@ -24,6 +24,7 @@ pub fn registration() -> ManagementRegistration {
             ("POST", "api/runs/start"),
             ("POST", "api/runs/step"),
             ("POST", "api/runs/control"),
+            ("POST", "api/runs/remediation/retry"),
             ("GET", "api/schedules"),
             ("POST", "api/schedules/save"),
             ("POST", "api/schedules/control"),
@@ -224,6 +225,10 @@ async fn dispatch(
         }
         ("POST", "api/runs/start") => start(service, &call.host, input(&call)?).await,
         ("POST", "api/runs/control") => control(service, &call.host, input(&call)?).await,
+        ("POST", "api/runs/remediation/retry") => {
+            let query:Identity=input(&call)?;
+            reply(json!({"run":crate::remediation::retry(service,&call.host,&query.id).await?.detail()}))
+        }
         ("POST", "api/runs/step") => {
             let query: Identity = input(&call)?;
             step(service, &call.host, &query.id).await

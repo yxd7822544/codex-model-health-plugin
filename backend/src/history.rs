@@ -55,6 +55,7 @@ struct Entry {
     created_at: u64,
     schedule_id: Option<String>,
     version: u64,
+    replaceable: bool,
 }
 impl Entry {
     fn new(run: &Run, version: u64) -> Self {
@@ -63,6 +64,7 @@ impl Entry {
             created_at: run.created_at,
             schedule_id: run.scheduled.as_ref().map(|s| s.schedule_id.clone()),
             version,
+            replaceable: run.replaceable(),
         }
     }
 }
@@ -125,17 +127,21 @@ pub(crate) async fn store(
     if entries.iter().flatten().any(|entry| entry.id == run.id) {
         return Ok(());
     }
-    let slot = entries.iter().position(Option::is_none).unwrap_or_else(|| {
-        entries
-            .iter()
-            .enumerate()
-            .min_by_key(|(_, entry)| {
-                let entry = entry.as_ref().unwrap();
-                (entry.created_at, entry.id.as_str())
-            })
-            .unwrap()
-            .0
-    });
+    let slot = entries
+        .iter()
+        .position(Option::is_none)
+        .or_else(|| {
+            entries
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| entry.as_ref().is_some_and(|entry| entry.replaceable))
+                .min_by_key(|(_, entry)| {
+                    let entry = entry.as_ref().unwrap();
+                    (entry.created_at, entry.id.as_str())
+                })
+                .map(|(slot, _)| slot)
+        })
+        .ok_or_else(|| invalid("历史改组操作尚未结束，暂时无法回收归档位置"))?;
     let result: Result<StatePutResult, _> = host::metadata(
         host,
         "host.state.put",
@@ -188,6 +194,56 @@ pub(crate) struct Query {
     pub page: usize,
     pub page_size: usize,
     pub schedule_id: Option<String>,
+}
+
+pub(crate) async fn set_remediation(
+    service: &Service,
+    host: &HostClient,
+    id: &str,
+    action: crate::remediation::Action,
+) -> Result<(), PluginFault> {
+    let mut archive = service.history.lock().await;
+    archive.load(host).await?;
+    let slot = archive
+        .entries
+        .as_ref()
+        .unwrap()
+        .iter()
+        .position(|entry| entry.as_ref().is_some_and(|entry| entry.id == id))
+        .ok_or_else(|| invalid("历史记录已超出保留范围"))?;
+    let Some((mut run, version)) = read(host, slot).await? else {
+        archive.entries = None;
+        return Err(invalid("历史记录已变化，请刷新重试"));
+    };
+    if run.id != id {
+        archive.entries = None;
+        return Err(invalid("历史记录已变化，请刷新重试"));
+    }
+    run.scheduled
+        .as_mut()
+        .ok_or_else(|| invalid("历史记录缺少定时检测信息"))?
+        .remediation = Some(action);
+    let result: Result<StatePutResult, _> = host::metadata(
+        host,
+        "host.state.put",
+        StatePutRequest {
+            namespace: namespace(slot),
+            key: format!("record-{slot}"),
+            value: encode(&run)?,
+            expected_version: Some(version),
+        },
+    )
+    .await;
+    match result {
+        Ok(value) => {
+            archive.entries.as_mut().unwrap()[slot] = Some(Entry::new(&run, value.version));
+            Ok(())
+        }
+        Err(error) => {
+            archive.entries = None;
+            Err(error)
+        }
+    }
 }
 
 pub(crate) async fn list(

@@ -3,9 +3,10 @@ import { computed, onMounted, onScopeDispose, shallowRef } from 'vue'
 import { ZButton, ZCard, ZTable, ZTag, ZDialog } from '@codex-proxy/ui'
 import type { TableColumn } from '@codex-proxy/ui'
 import type { Bootstrap } from './api'
+import { api } from './api'
 import { schedulesApi } from './api/schedules'
 import type { Schedule, RoundMember } from './api/schedules'
-import { alertStatusText, remediationStatusText, formatTime, methodText, verdict, runStatusText } from './presentation'
+import { alertStatusText, remediationStatusText, canRetryRemediation, formatTime, methodText, verdict, runStatusText } from './presentation'
 import { accountDisplayName } from './accountDisplay'
 import ScheduleEditor from './ScheduleEditor.vue'
 
@@ -58,6 +59,13 @@ async function control(item: Schedule, action: string) {
   catch(cause) {error.value=cause instanceof Error ? cause.message : String(cause)}
   finally {busy.value=''}
 }
+async function retryRemediation(id:string) {
+  if(busy.value) return
+  ++sequence;busy.value=`remediation:${id}`;error.value=''
+  try {await api('runs/remediation/retry',{id});await load()}
+  catch(cause) {error.value=cause instanceof Error ? cause.message : String(cause)}
+  finally {busy.value=''}
+}
 onMounted(()=>{void poll()})
 onScopeDispose(()=>{disposed=true; ++sequence; clearTimeout(timer)})
 </script>
@@ -79,6 +87,6 @@ onScopeDispose(()=>{disposed=true; ++sequence; clearTimeout(timer)})
     </template>
   </ZCard>
   <ScheduleEditor v-model="editor" :bootstrap="bootstrap" :schedule="editing" @saved="load" />
-  <ZDialog :model-value="!!detail" :title="`${detail?.name ?? ''} · 本轮检测`" width="60rem" @update:model-value="value=>{if(!value) detailId=''}"><p class="text-z-sm text-z-text-secondary">{{ detail && unfinished(detail) ? '各账号依次执行；失败或暂停账号保留原因后跳过，不阻塞后续账号' : '本轮已结束，下一轮开始时更新此列表' }}。完整历史至少保留 1000 条，可在执行历史中翻页查看</p><ZTable :columns="memberColumns" :data="detail?.round?.members ?? []"><template #account_id="{row}">{{ accountName(row.account_id) }}</template><template #result="{row}"><p v-if="row.error" class="text-z-warning-text">{{ row.error }}</p><div v-else-if="row.run"><span>{{ runStatusText(row.run) }}</span><p v-if="row.run.status === 'completed'" class="text-z-xs text-z-text-secondary">{{ verdict(row.run.report,row.run.status) }}</p><p v-if="row.run.task_error" class="text-z-xs text-z-warning-text">{{ row.run.task_error }}</p></div><span v-else>{{ row.finished_at !== null ? '已结束 · 报告已过保留期' : '等待入队' }}</span></template><template #alert="{row}"><template v-if="row.run?.alert"><span>{{ ['completed','stopped'].includes(row.run.status) ? alertStatusText[row.run.alert.status] : '检测完成后判定' }}</span><p v-if="row.run.alert.error" class="text-z-xs text-z-warning-text">{{ row.run.alert.error }}</p></template><span v-else>—</span></template><template #remediation="{row}"><div v-if="row.run?.scheduled?.remediation && ['completed','stopped'].includes(row.run.status)"><span>{{ remediationStatusText[row.run.scheduled.remediation.status] }}</span><p v-if="row.run.scheduled.remediation.error" class="text-z-xs text-z-warning-text">{{ row.run.scheduled.remediation.error }}</p></div><span v-else>—</span></template><template #actions="{row}"><ZButton v-if="row.run" size="small" @click="openReport(row.run.id)">查看报告</ZButton></template></ZTable></ZDialog>
+  <ZDialog :model-value="!!detail" :title="`${detail?.name ?? ''} · 本轮检测`" width="60rem" @update:model-value="value=>{if(!value) detailId=''}"><p class="text-z-sm text-z-text-secondary">{{ detail && unfinished(detail) ? '各账号依次执行；失败或暂停账号保留原因后跳过，不阻塞后续账号' : '本轮已结束，下一轮开始时更新此列表' }}。完整历史至少保留 1000 条，可在执行历史中翻页查看</p><ZTable :columns="memberColumns" :data="detail?.round?.members ?? []"><template #account_id="{row}">{{ accountName(row.account_id) }}</template><template #result="{row}"><p v-if="row.error" class="text-z-warning-text">{{ row.error }}</p><div v-else-if="row.run"><span>{{ runStatusText(row.run) }}</span><p v-if="row.run.status === 'completed'" class="text-z-xs text-z-text-secondary">{{ verdict(row.run.report,row.run.status) }}</p><p v-if="row.run.task_error" class="text-z-xs text-z-warning-text">{{ row.run.task_error }}</p></div><span v-else>{{ row.finished_at !== null ? '已结束 · 报告已过保留期' : '等待入队' }}</span></template><template #alert="{row}"><template v-if="row.run?.alert"><span>{{ ['completed','stopped'].includes(row.run.status) ? alertStatusText[row.run.alert.status] : '检测完成后判定' }}</span><p v-if="row.run.alert.error" class="text-z-xs text-z-warning-text">{{ row.run.alert.error }}</p></template><span v-else>—</span></template><template #remediation="{row}"><div v-if="row.run?.scheduled?.remediation && ['completed','stopped'].includes(row.run.status)"><span>{{ remediationStatusText[row.run.scheduled.remediation.status] }}</span><p v-if="row.run.scheduled.remediation.error" class="text-z-xs text-z-warning-text">{{ row.run.scheduled.remediation.error }}</p></div><span v-else>—</span></template><template #actions="{row}"><ZButton v-if="row.run" size="small" @click="openReport(row.run.id)">查看报告</ZButton><ZButton v-if="row.run && ['completed','stopped'].includes(row.run.status) && canRetryRemediation(row.run.scheduled?.remediation)" size="small" :disabled="!!busy" :loading="busy===`remediation:${row.run.id}`" @click="retryRemediation(row.run.id)">重试改组</ZButton></template></ZTable></ZDialog>
   <ZDialog :model-value="!!deleting" title="删除定时任务" width="28rem" :show-close="!busy" @update:model-value="value => {if (!value && !busy) deleting=null}"><p>删除「{{ deleting?.name }}」的执行计划，已有检测记录仍保留</p><div class="flex justify-end gap-2"><ZButton :disabled="!!busy" @click="deleting=null">取消</ZButton><ZButton type="danger" :loading="!!busy" @click="deleting && control(deleting,'delete')">删除</ZButton></div></ZDialog>
 </template>

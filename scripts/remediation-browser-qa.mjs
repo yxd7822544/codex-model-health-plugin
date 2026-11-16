@@ -17,6 +17,7 @@ try {
   })
   const theme=await seedPage.locator('html').evaluate(e=>{const s=getComputedStyle(e);return Array.from(s).filter(n=>n.startsWith('--')).map(n=>`${n}:${s.getPropertyValue(n)}`).join(';')});await seedPage.close()
   let phase='pending'
+  const retries=[]
   const action=status=>({status,attempts:status==='pending'?0:1,error:status==='failed'?'宿主改组接口失败（HTTP 503）':null,group_id:status==='succeeded'?'group-downgraded':null,completed_at:status==='succeeded'?Date.now():null})
   const records=()=>[0,1].map(index=>{
     const finished=index===0 || phase==='empty'
@@ -29,6 +30,12 @@ try {
     if(input.path==='api/schedules')return {schedules:[schedule()],alerts_configured:false,remediation_configured:true}
     if(input.path==='api/runs')return {runs:records().map(run=>({...run,method:'meow',tier:'low',request_model:'gpt-6-astra',attempts:run.attempts.length})),total:2,page:1,page_size:JSON.parse(input.body).page_size}
     if(input.path==='api/runs/get')return {run:records().find(run=>run.id===JSON.parse(input.body).id)}
+    if(input.path==='api/runs/remediation/retry') {
+      assert.equal(input.method,'POST')
+      assert.deepEqual(JSON.parse(input.body),{id:'0-1'})
+      retries.push(JSON.parse(input.body).id);phase='success'
+      return {run:records()[0]}
+    }
     throw new Error(`unexpected mutation ${input.path}`)
   })
   await context.addInitScript(()=>{window.codexProxyPlugin={version:2,request:async input=>({status:200,contentType:'application/json',body:new TextEncoder().encode(JSON.stringify(await window.__remediationHost(input))).buffer})}})
@@ -40,12 +47,24 @@ try {
   phase='success'
   await dialog.getByText('已移入 GPT降智分组，并移出本计划',{exact:true}).waitFor({timeout:10000})
   assert.equal(await dialog.getByRole('row').count(),3,'frozen round still contains both accounts')
-  await page.keyboard.press('Escape');await dialog.waitFor({state:'hidden'})
+  await dialog.press('Escape');await dialog.waitFor({state:'hidden'})
   await row.getByText('后续检测 1 个账号',{exact:true}).waitFor()
   phase='failed';await row.getByText('后续检测 2 个账号',{exact:true}).waitFor({timeout:10000})
   await row.getByRole('button',{name:'查看本轮',exact:true}).click()
   await dialog.getByText('自动改组失败',{exact:true}).waitFor();await dialog.getByText('宿主改组接口失败（HTTP 503）',{exact:true}).waitFor()
-  await page.keyboard.press('Escape');await dialog.waitFor({state:'hidden'})
+  assert.equal(await dialog.getByRole('button',{name:'重试改组',exact:true}).count(),1,'unfinished accounts cannot retry grouping')
+  await dialog.getByRole('button',{name:'重试改组',exact:true}).click()
+  await dialog.getByText('已移入 GPT降智分组，并移出本计划',{exact:true}).waitFor()
+  assert.equal(await dialog.getByRole('row').count(),3,'retry preserves the full round')
+  await dialog.press('Escape');await dialog.waitFor({state:'hidden'})
+  await row.getByText('后续检测 1 个账号',{exact:true}).waitFor()
+  phase='failed'
+  await page.getByRole('button',{name:'查看 主账号 的检测报告',exact:true}).click()
+  const report=page.getByRole('region',{name:'检测报告'})
+  await report.getByText(/自动改组失败/).waitFor()
+  await report.getByRole('button',{name:'重试改组',exact:true}).click()
+  await report.getByText('已移入 GPT降智分组，并移出本计划',{exact:true}).waitFor()
+  assert.deepEqual(retries,['0-1','0-1'],'both entry points only call remediation retry')
   phase='empty';await row.getByText('后续检测 0 个账号',{exact:true}).waitFor({timeout:10000})
   assert.equal(await row.getByRole('button',{name:'启用',exact:true}).isDisabled(),true)
   await row.getByText('已结束 2 / 2 个账号',{exact:true}).waitFor()
@@ -53,5 +72,5 @@ try {
   await page.getByRole('region',{name:'检测报告'}).getByText('已移入 GPT降智分组，并移出本计划',{exact:true}).waitFor()
   await row.screenshot({path:`${root}/review/screenshots/remediation-empty-plan.png`})
   assert.deepEqual(errors,[])
-  console.log('Remediation UI passed: live account count, unchanged round members, failure reasons, report status, empty-plan disabled state.')
+  console.log('Remediation UI passed: both retry buttons, no model rerun, live account count, unchanged round members, failure reasons, report status, empty-plan disabled state.')
 } finally {await browser.close()}

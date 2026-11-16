@@ -2,7 +2,7 @@ use super::*;
 use base64::{Engine as _,engine::general_purpose::STANDARD};
 use flate2::{Compression,write::GzEncoder};
 
-fn encoded(run:&Value)->Value {
+pub(super) fn encoded(run:&Value)->Value {
     let mut writer=GzEncoder::new(Vec::new(),Compression::default());
     serde_json::to_writer(&mut writer,run).unwrap();
     json!({"data":STANDARD.encode(writer.finish().unwrap())})

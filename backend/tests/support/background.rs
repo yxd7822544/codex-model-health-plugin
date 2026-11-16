@@ -653,6 +653,44 @@ async fn old_reports_and_replaced_account_identities_never_trigger_auto_move() {
 }
 
 #[tokio::test]
+async fn explicit_remediation_retry_repairs_active_and_archived_failures_without_inference() {
+    for mode in ["active","archive","interrupted_archive","retry_still_fails"] {
+        let mut peer=Peer::configured(json!({"hostAdminApiKey":"fixture-admin"})).await;
+        let mut host=Host {numeric_answer:true,..Default::default()};let item=scheduled(&mut peer,&mut host).await;
+        peer.api("api/schedules/control",Some(json!({"id":item["id"],"revision":1,"action":"enable"})),&mut host).await.unwrap();let mut bg=Background::new(peer,3_600_000).await;
+        bg.until(&mut host,|h|h.state.values().any(|(run,_)|run["status"]=="completed")).await;
+        let mut peer=bg.cancel(&mut host).await;
+        let run=&mut host.state.values_mut().next().unwrap().0;
+        run["scheduled"]["remediation"]["status"]=json!(if mode=="interrupted_archive" {"moving"} else {"failed"});
+        run["scheduled"]["remediation"]["attempts"]=json!(3);
+        run["scheduled"]["remediation"]["next_attempt_at"]=json!(0);
+        run["scheduled"]["remediation"]["error"]=json!("宿主改组接口请求失败");
+        run["scheduled"]["alert"]["status"]=json!("not_required");run["scheduled"]["awaiting_checkpoint"]=json!(false);
+        let original=run.clone();let id=run["id"].clone();
+        if mode!="active" {host.archive.insert("record-0".into(),(super::history::encoded(&original),1));host.state.clear();}
+        if mode=="retry_still_fails" {
+            let mut initial=original.clone();initial["scheduled"]["remediation"]["attempts"]=json!(1);
+            host.archive.insert("record-0".into(),(super::history::encoded(&initial),1));
+            host.remediation_statuses=vec![503].into();
+            let failed=peer.api("api/runs/remediation/retry",Some(json!({"id":id})),&mut host).await.unwrap()["run"].clone();
+            assert_eq!(failed["scheduled"]["remediation"]["status"],"failed");assert_eq!(failed["scheduled"]["remediation"]["attempts"],2);
+            assert_eq!(host.executions.len(),3);assert_eq!(host.schedules["items"].0[0]["account_ids"],json!(["account-b"]));
+            for field in ["attempts","report","plan"] {assert_eq!(failed[field],original[field]);}
+            continue;
+        }
+        let repaired=peer.api("api/runs/remediation/retry",Some(json!({"id":id})),&mut host).await.unwrap()["run"].clone();
+        assert_eq!(repaired["scheduled"]["remediation"]["status"],"succeeded");assert_eq!(repaired["scheduled"]["remediation"]["attempts"],4);
+        for field in ["attempts","report","plan"] {assert_eq!(repaired[field],original[field]);}
+        assert_eq!(host.executions.len(),3);assert_eq!(host.remediation_posts.len(),1);assert!(host.internal_http_body.is_none());
+        assert_eq!(host.schedules["items"].0[0]["account_ids"],json!([]));
+        assert!(peer.api("api/runs/remediation/retry",Some(json!({"id":id})),&mut host).await.is_err());
+        let reopened=peer.api("api/runs/get",Some(json!({"id":id})),&mut host).await.unwrap();
+        assert_eq!(reopened["run"]["scheduled"]["remediation"]["status"],"succeeded");assert_eq!(host.remediation_posts.len(),1);
+        if mode!="active" {assert!(host.state.is_empty());assert_eq!(host.archive.len(),1);}
+    }
+}
+
+#[tokio::test]
 async fn group_mutation_failure_retains_schedule_and_stops_after_three_attempts() {
     let mut peer=Peer::configured(json!({"hostAdminApiKey":"fixture-admin"})).await;
     let mut host=Host {numeric_answer:true,remediation_statuses:vec![503;3].into(),..Default::default()};let item=scheduled(&mut peer,&mut host).await;
