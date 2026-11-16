@@ -32,7 +32,7 @@ try {
     let value
     if (input.path==='api/bootstrap') value=boot
     else if (input.path==='api/models') value={models:['gpt-6-astra']}
-    else if (input.path==='api/runs') value={runs:runs.map(r=>({...r,method:r.plan.method,tier:r.plan.tier,request_model:r.plan.request_model,claimed_model:r.plan.claimed_model,attempts:r.attempts.length}))}
+    else if (input.path==='api/runs') value={total:runs.length,page:1,page_size:data.page_size,runs:runs.map(r=>({...r,method:r.plan.method,tier:r.plan.tier,request_model:r.plan.request_model,claimed_model:r.plan.claimed_model,attempts:r.attempts.length}))}
     else if (input.path==='api/runs/get') value={run:runs.find(r=>r.id===data.id)}
     else if (input.path==='api/runs/control') {
       assert.equal(data.action,'stop','异常记录不能继续检测')

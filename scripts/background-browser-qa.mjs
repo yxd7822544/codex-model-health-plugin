@@ -49,7 +49,7 @@ try {
       r.plan.jobs=Array.from({length:16},(_,i)=>({job_id:`probe-${i}`}))
       r.report.valid_samples=0
       runs.push(r); value={run:r}
-    } else if (input.path==='api/runs') value={runs:[...runs].reverse().map(r=>({...r,method:r.plan.method,tier:r.plan.tier,request_model:r.plan.request_model,claimed_model:r.plan.claimed_model,attempts:r.attempts.length,planned:r.plan.jobs.length}))}
+    } else if (input.path==='api/runs') value={total:runs.length,page:1,page_size:data.page_size,runs:[...runs].reverse().map(r=>({...r,method:r.plan.method,tier:r.plan.tier,request_model:r.plan.request_model,claimed_model:r.plan.claimed_model,attempts:r.attempts.length,planned:r.plan.jobs.length}))}
     else if (input.path==='api/runs/get') {
       value={run:structuredClone(runs.find(r=>r.id===data.id))}
       if (holdId===data.id) {

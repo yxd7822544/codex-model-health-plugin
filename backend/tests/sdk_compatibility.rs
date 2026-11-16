@@ -25,7 +25,7 @@ fn management_contract_preserves_the_host_floor_and_accepts_the_upgrade_target()
     ] {
         assert!(!range.matches(&version.parse().unwrap()), "{version}");
     }
-    assert_eq!(manifest.state.len(), 2);
+    assert_eq!(manifest.state.len(), 16);
     assert_eq!(manifest.state[0].namespace, "runs");
     assert_eq!(manifest.state[0].schema_version, 1);
     assert_eq!(

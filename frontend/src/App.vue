@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onScopeDispose, ref, watch } from 'vue'
-import { ZButton, ZCard, ZSelect, ZSegmented, ZTable, ZTag, ZIconButton, ZConfigProvider } from '@codex-proxy/ui'
+import { ZButton, ZCard, ZSelect, ZSegmented, ZTable, ZTag, ZIconButton, ZConfigProvider, ZPagination } from '@codex-proxy/ui'
 import type { TableColumn } from '@codex-proxy/ui'
 import { zhHans } from '@codex-proxy/ui/locale'
 import { Play, Pause, Square, RefreshCw, FlaskConical, ArrowRight, Check, Fingerprint, ShieldCheck } from '@lucide/vue'
 import { api } from './api'
-import type { Bootstrap, Run, History, Method } from './api'
+import type { Bootstrap, Run, History, HistoryPage, Method } from './api'
 import { accountDisplayName } from './accountDisplay'
 import { alertStatusText, formatTime, methodText, runStatusText, tierText, verdict, tone, reasonText } from './presentation'
 import SourceUpdates from './SourceUpdates.vue'
@@ -16,7 +16,8 @@ const preview = import.meta.env.DEV && new URLSearchParams(location.search).get(
 const bootstrap = ref<Bootstrap | null>(null), history = ref<History[]>([]), run = ref<Run | null>(null)
 const historyFilter = ref<{id: string; name: string} | null>(null)
 const historySection = ref<HTMLElement | null>(null), reportSection = ref<HTMLElement | null>(null)
-const visibleHistory = computed(()=>historyFilter.value ? history.value.filter(item=>item.scheduled?.schedule_id===historyFilter.value!.id) : history.value)
+const historyPage = ref(1), historyPageSize = ref(20), historyTotal = ref(0), historyLoading = ref(false)
+let historySequence = 0
 const loading = ref(true), error = ref(''), action = ref(false), connectionError = ref(''), modelsLoading = ref(false), starting = ref(false)
 const account = ref(''), key = ref(''), model = ref(''), claimed = ref(''), tier = ref('low'), models = ref<string[]>([])
 const method = ref<Method>('meow')
@@ -43,7 +44,19 @@ const historyColumns: TableColumn<History>[] = [{key:'created_at',label:'检测�
 const accountOptions = computed(() => bootstrap.value?.accounts.map(a => ({value:a.id,label:accountDisplayName(a)})) ?? [])
 
 function message(cause: unknown) { return cause instanceof Error ? cause.message : String(cause) }
-async function loadHistory() { history.value = (await api<{runs: History[]}>('runs')).runs }
+function historyQuery() { return {page:historyPage.value,page_size:historyPageSize.value,schedule_id:historyFilter.value?.id ?? null} }
+function applyHistory(value: HistoryPage) {history.value=value.runs; historyTotal.value=value.total; historyPage.value=value.page}
+async function loadHistory() {
+  const sequence=++historySequence
+  historyLoading.value=true
+  try {const result=await api<HistoryPage>('runs',historyQuery());if(!disposed && sequence===historySequence) applyHistory(result)}
+  finally {if(sequence===historySequence) historyLoading.value=false}
+}
+async function changeHistory(page: number, size=historyPageSize.value) {
+  ++viewVersion; historyPage.value=page; historyPageSize.value=size
+  try {await loadHistory();connectionError.value=''} catch(cause) {connectionError.value=`历史记录读取失败：${message(cause)}`}
+}
+async function clearHistoryFilter() {historyFilter.value=null; await changeHistory(1)}
 async function load() {
   loading.value = true; error.value = ''
   try { bootstrap.value = await api<Bootstrap>('bootstrap'); await loadHistory(); if (key.value) await loadModels(key.value) }
@@ -73,23 +86,19 @@ function schedulePoll(delay = 2000) {
 }
 async function refreshStatus() {
   if (polling || disposed || document.visibilityState !== 'visible') return
-  if (action.value || loading.value) { schedulePoll(); return }
+  if (action.value || loading.value || historyLoading.value) { schedulePoll(); return }
   polling = true
-  const version = viewVersion, id = run.value?.id
+  const version = viewVersion, id = run.value?.id, historyRequest=++historySequence
   try {
     const [listResult, detailResult] = await Promise.allSettled([
-      api<{runs: History[]}>('runs'),
+      api<HistoryPage>('runs',historyQuery()),
       id ? api<{run: Run}>('runs/get', {id}) : Promise.resolve(null),
     ])
     if (listResult.status === 'rejected') throw listResult.reason
     if (!disposed && version === viewVersion && !action.value) {
-      history.value = listResult.value.runs
-      if (id && !history.value.some(r => r.id === id)) {
-        run.value = null // selected finished record left the 16-slot retention window
-      } else {
-        if (detailResult.status === 'rejected') throw detailResult.reason
-        if (detailResult.value && run.value?.id === id) run.value = detailResult.value.run
-      }
+      if(historyRequest===historySequence) applyHistory(listResult.value)
+      if (detailResult.status === 'rejected') throw detailResult.reason
+      if (detailResult.value && run.value?.id === id) run.value = detailResult.value.run
       connectionError.value = ''
     }
   } catch (cause) {
@@ -101,6 +110,7 @@ async function start() {
   await operate(async () => {
     run.value = (await api<{run: Run}>('runs/start', {background:true,method:method.value,account_id:account.value,key_id:key.value,request_model:model.value,claimed_model:claimed.value,tier:tier.value})).run
     reportView.value = 'fingerprint'
+    historyPage.value=1; historyFilter.value=null
     await loadHistory()
   })
   starting.value = false
@@ -112,7 +122,7 @@ async function control(command: string) {
   schedulePoll(0)
 }
 async function openRun(id: string) { await operate(async () => { run.value = (await api<{run: Run}>('runs/get',{id})).run }); await nextTick(); reportSection.value?.scrollIntoView({block:'start',behavior:'smooth'}) }
-async function showHistory(schedule: {id: string; name: string}) {historyFilter.value=schedule; await nextTick(); historySection.value?.scrollIntoView({block:'start',behavior:'smooth'}); void refreshStatus()}
+async function showHistory(schedule: {id: string; name: string}) {historyFilter.value=schedule; await changeHistory(1); await nextTick(); historySection.value?.scrollIntoView({block:'start',behavior:'smooth'})}
 function visibility() { ++viewVersion; clearTimeout(pollTimer); if (document.visibilityState === 'visible') schedulePoll(0) }
 onMounted(() => { void load().finally(() => schedulePoll()); document.addEventListener('visibilitychange',visibility) })
 onScopeDispose(() => { disposed=true; ++viewVersion; clearTimeout(pollTimer); document.removeEventListener('visibilitychange',visibility) })
@@ -181,8 +191,8 @@ onScopeDispose(() => { disposed=true; ++viewVersion; clearTimeout(pollTimer); do
     </section>
     <section ref="historySection" aria-label="检测执行记录">
     <ZCard>
-      <template #header><div class="flex flex-wrap justify-between gap-3"><div><h2>任务列表</h2><p class="subtitle">保留最近 16 条记录 · 报告沿用检测时的基线，不重新评分</p></div><div class="flex flex-wrap items-center gap-2"><ZTag v-if="historyFilter">{{ historyFilter.name }} · 执行历史</ZTag><ZButton v-if="historyFilter" size="small" @click="historyFilter=null">显示全部</ZButton><ZTag>{{ visibleHistory.length }} 条</ZTag></div></div></template>
-      <template #body><ZTable :columns="historyColumns" :data="visibleHistory" :loading="loading" :empty-text="historyFilter ? '此计划暂无保留的执行记录，启用后可在此查看结果' : '还没有检测记录。选择账号，开始第一次检测。'"><template #account_name="{row}"><div class="grid gap-1"><span>{{ row.account_name || row.account_id }}</span><span v-if="row.scheduled" class="text-z-xs text-z-text-secondary">定时 · {{ row.scheduled.name }}</span></div></template><template #result="{row}"><div class="grid justify-items-start gap-1"><ZTag :type="row.data_error ? 'warning' : tone(row.report,row.status)">{{ row.data_error ? '记录异常' : row.status === 'completed' || row.status === 'stopped' ? verdict(row.report,row.status) : runStatusText(row) }}</ZTag><span v-if="row.scheduled && (row.status === 'completed' || row.status === 'stopped')" class="text-z-xs" :class="row.scheduled.alert.status === 'failed' ? 'text-z-warning-text' : 'text-z-text-secondary'">{{ alertStatusText[row.scheduled.alert.status] }}</span></div></template><template #actions="{row}"><ZIconButton :aria-label="`查看 ${row.account_name || row.account_id} 的检测报告`" :disabled="action" @click="openRun(row.id)"><ArrowRight class="size-4" /></ZIconButton></template></ZTable></template>
+      <template #header><div class="flex flex-wrap justify-between gap-3"><div><h2>任务列表</h2><p class="subtitle">至少保留 1000 条历史记录 · 报告沿用检测时的基线，不重新评分</p></div><div class="flex flex-wrap items-center gap-2"><ZTag v-if="historyFilter">{{ historyFilter.name }} · 执行历史</ZTag><ZButton v-if="historyFilter" size="small" @click="clearHistoryFilter">显示全部</ZButton><ZTag>共 {{ historyTotal }} 条</ZTag></div></div></template>
+      <template #body><ZTable :columns="historyColumns" :data="history" :loading="loading || historyLoading" :empty-text="historyFilter ? '此计划暂无保留的执行记录，启用后可在此查看结果' : '还没有检测记录。选择账号，开始第一次检测。'"><template #account_name="{row}"><div class="grid gap-1"><span>{{ row.account_name || row.account_id }}</span><span v-if="row.scheduled" class="text-z-xs text-z-text-secondary">定时 · {{ row.scheduled.name }}</span></div></template><template #result="{row}"><div class="grid justify-items-start gap-1"><ZTag :type="row.data_error ? 'warning' : tone(row.report,row.status)">{{ row.data_error ? '记录异常' : row.status === 'completed' || row.status === 'stopped' ? verdict(row.report,row.status) : runStatusText(row) }}</ZTag><span v-if="row.scheduled && (row.status === 'completed' || row.status === 'stopped')" class="text-z-xs" :class="row.scheduled.alert.status === 'failed' ? 'text-z-warning-text' : 'text-z-text-secondary'">{{ alertStatusText[row.scheduled.alert.status] }}</span></div></template><template #actions="{row}"><ZIconButton :aria-label="`查看 ${row.account_name || row.account_id} 的检测报告`" :disabled="action" @click="openRun(row.id)"><ArrowRight class="size-4" /></ZIconButton></template></ZTable><ZPagination :current-page="historyPage" :page-size="historyPageSize" :total="historyTotal" :page-sizes="[20,50,100]" :disabled="loading || historyLoading" @current-change="page => changeHistory(page)" @size-change="size => changeHistory(1,size)" /></template>
     </ZCard>
     </section>
   </main>

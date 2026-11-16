@@ -705,7 +705,7 @@ async fn schedule_saves_all_47_accounts_and_completes_beyond_the_history_window(
     let members = item["round"]["members"].as_array().unwrap();
     assert_eq!(members.len(), 47);
     assert!(members.iter().all(|m| m["finished_at"].is_number() && m["error"].is_null()));
-    assert_eq!(members.iter().filter(|m| m["run"].is_object()).count(), 16);
+    assert_eq!(members.iter().filter(|m| m["run"].is_object()).count(), 47);
     let completed = members.iter().map(|m| m["finished_at"].as_u64().unwrap()).max().unwrap();
     assert_eq!(item["next_run_at"], completed + 3_600_000);
     bg.cancel(&mut host).await;
@@ -736,7 +736,7 @@ async fn more_than_16_account_failures_do_not_block_a_47_account_round() {
     for (index, member) in members.iter().enumerate() {
         if index < 20 {
             assert_eq!(member["error"], format!("fixture failure for account-{index}"));
-            assert!(member["run"].is_null(), "error remains after full report is recycled");
+            assert_eq!(member["run"]["status"], "stopped", "archived failure report remains readable");
         } else {
             assert!(member["error"].is_null());
         }

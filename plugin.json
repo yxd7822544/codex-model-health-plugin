@@ -6,16 +6,29 @@
   "version": "0.4.4",
   "description": "选择已有账号，使用 Meow 或 ModelTrace 检测模型行为指纹；独立插件，不改写账号或主服务",
   "license": "PolyForm-Noncommercial-1.0.0",
-  "engines": {"codex-proxy-rs": ">=3.37.2, <4.0.0"},
+  "engines": {"codex-proxy-rs":">=3.37.2, <4.0.0"},
   "main": "bin/plugin",
   "runtime": "trustedProcess",
-  "contributes": {"management": {"version": 2}, "maintenance": {"version": 1}},
-  "resources": {"web/index.html":"text/html", "web/app.js":"text/javascript", "web/app.css":"text/css", "legal/LICENSE":"text/plain", "legal/NOTICE":"text/plain", "engine-legal/ENGINE-LICENSES.txt":"text/plain", "engine-legal/ENGINE-REQUIREMENTS.txt":"text/plain"},
+  "contributes": {"management":{"version":2},"maintenance":{"version":1}},
+  "resources": {"web/index.html":"text/html","web/app.js":"text/javascript","web/app.css":"text/css","legal/LICENSE":"text/plain","legal/NOTICE":"text/plain","engine-legal/ENGINE-LICENSES.txt":"text/plain","engine-legal/ENGINE-REQUIREMENTS.txt":"text/plain"},
   "configurationSchema": {"type":"object","properties":{"hostApiBaseUrl":{"type":"string","title":"宿主管理地址","description":"读取账号分组使用的本机地址，仅支持 HTTP 回环 IP 和端口；宿主监听端口不是 8080 时修改","default":"http://127.0.0.1:8080"},"feishuWebhook":{"type":"string","title":"飞书群机器人 Webhook","description":"可选，仅用于不匹配消息告警；未配置也可执行检测和查看历史，机器人关键词可设为 模型检测告警"}},"additionalProperties":false},
   "secretFields": ["feishuWebhook"],
-  "state": [{
-    "namespace":"runs", "schemaVersion":1,
-    "schema":{"type":"object", "required":["id","slot","plan","attempts","status"], "properties":{"id":{"type":"string","maxLength":100},"slot":{"type":"integer","minimum":0,"maximum":15},"plan":{"type":"object"},"attempts":{"type":"array","maxItems":162},"status":{"enum":["ready","running","paused","completed","stopped"]}}},
-    "maximumRecords":16, "maximumBytes":4194304, "maximumValueBytes":262144, "migratesFrom":[]
-  }, {"namespace":"schedules","schemaVersion":1,"schema":{"type":"array","maxItems":16,"items":{"type":"object"}},"maximumRecords":1,"maximumBytes":262144,"maximumValueBytes":262144,"migratesFrom":[]}]
+  "state": [
+    {"namespace":"runs","schemaVersion":1,"schema":{"type":"object","required":["id","slot","plan","attempts","status"],"properties":{"id":{"type":"string","maxLength":100},"slot":{"type":"integer","minimum":0,"maximum":15},"plan":{"type":"object"},"attempts":{"type":"array","maxItems":162},"status":{"enum":["ready","running","paused","completed","stopped"]}}},"maximumRecords":16,"maximumBytes":4194304,"maximumValueBytes":262144,"migratesFrom":[]},
+    {"namespace":"schedules","schemaVersion":1,"schema":{"type":"array","maxItems":16,"items":{"type":"object"}},"maximumRecords":1,"maximumBytes":262144,"maximumValueBytes":262144,"migratesFrom":[]},
+    {"namespace":"history-0","schemaVersion":1,"schema":{"type":"object","required":["data"],"properties":{"data":{"type":"string"}}},"maximumRecords":72,"maximumBytes":16777216,"maximumValueBytes":229376,"migratesFrom":[]},
+    {"namespace":"history-1","schemaVersion":1,"schema":{"type":"object","required":["data"],"properties":{"data":{"type":"string"}}},"maximumRecords":72,"maximumBytes":16777216,"maximumValueBytes":229376,"migratesFrom":[]},
+    {"namespace":"history-2","schemaVersion":1,"schema":{"type":"object","required":["data"],"properties":{"data":{"type":"string"}}},"maximumRecords":72,"maximumBytes":16777216,"maximumValueBytes":229376,"migratesFrom":[]},
+    {"namespace":"history-3","schemaVersion":1,"schema":{"type":"object","required":["data"],"properties":{"data":{"type":"string"}}},"maximumRecords":72,"maximumBytes":16777216,"maximumValueBytes":229376,"migratesFrom":[]},
+    {"namespace":"history-4","schemaVersion":1,"schema":{"type":"object","required":["data"],"properties":{"data":{"type":"string"}}},"maximumRecords":72,"maximumBytes":16777216,"maximumValueBytes":229376,"migratesFrom":[]},
+    {"namespace":"history-5","schemaVersion":1,"schema":{"type":"object","required":["data"],"properties":{"data":{"type":"string"}}},"maximumRecords":72,"maximumBytes":16777216,"maximumValueBytes":229376,"migratesFrom":[]},
+    {"namespace":"history-6","schemaVersion":1,"schema":{"type":"object","required":["data"],"properties":{"data":{"type":"string"}}},"maximumRecords":72,"maximumBytes":16777216,"maximumValueBytes":229376,"migratesFrom":[]},
+    {"namespace":"history-7","schemaVersion":1,"schema":{"type":"object","required":["data"],"properties":{"data":{"type":"string"}}},"maximumRecords":72,"maximumBytes":16777216,"maximumValueBytes":229376,"migratesFrom":[]},
+    {"namespace":"history-8","schemaVersion":1,"schema":{"type":"object","required":["data"],"properties":{"data":{"type":"string"}}},"maximumRecords":72,"maximumBytes":16777216,"maximumValueBytes":229376,"migratesFrom":[]},
+    {"namespace":"history-9","schemaVersion":1,"schema":{"type":"object","required":["data"],"properties":{"data":{"type":"string"}}},"maximumRecords":72,"maximumBytes":16777216,"maximumValueBytes":229376,"migratesFrom":[]},
+    {"namespace":"history-10","schemaVersion":1,"schema":{"type":"object","required":["data"],"properties":{"data":{"type":"string"}}},"maximumRecords":72,"maximumBytes":16777216,"maximumValueBytes":229376,"migratesFrom":[]},
+    {"namespace":"history-11","schemaVersion":1,"schema":{"type":"object","required":["data"],"properties":{"data":{"type":"string"}}},"maximumRecords":72,"maximumBytes":16777216,"maximumValueBytes":229376,"migratesFrom":[]},
+    {"namespace":"history-12","schemaVersion":1,"schema":{"type":"object","required":["data"],"properties":{"data":{"type":"string"}}},"maximumRecords":72,"maximumBytes":16777216,"maximumValueBytes":229376,"migratesFrom":[]},
+    {"namespace":"history-13","schemaVersion":1,"schema":{"type":"object","required":["data"],"properties":{"data":{"type":"string"}}},"maximumRecords":72,"maximumBytes":16777216,"maximumValueBytes":229376,"migratesFrom":[]}
+  ]
 }

@@ -157,6 +157,7 @@ with tempfile.TemporaryDirectory(prefix="model-health-smoke-") as directory:
             assert params["client_key_id"] == "smoke-key" and params["protocol"] == "openai"
             return {"models": ["gpt-6-astra"]}, b""
         if method == "host.state.get":
+            if params["namespace"].startswith("history-"): return {"record": None}, b""
             assert params["namespace"] == "runs"
             return {"record": host["state"].get(params["key"])}, b""
         if method == "host.state.put":
@@ -208,6 +209,7 @@ with tempfile.TemporaryDirectory(prefix="model-health-smoke-") as directory:
         raise AssertionError("unexpected callback: " + method)
 
     def api(path, body=None):
+        if path == "api/runs" and body is None: body = {"page": 1, "page_size": 100, "schedule_id": None}
         context["call_id"] += 2
         identifier = context["call_id"]
         schedule = CallSchedule(identifier)

@@ -111,7 +111,7 @@ try {
   const csp = "default-src 'none'; script-src 'unsafe-inline' data:; style-src 'unsafe-inline' data:; img-src data:; font-src data:; media-src data:; connect-src 'none'; worker-src 'none'; child-src 'none'; frame-src 'none'; object-src 'none'; manifest-src 'none'; base-uri 'none'; form-action 'none'"
   const mock = `document.documentElement.dataset.theme=${JSON.stringify(theme.name)};for(const [name,value] of Object.entries(${JSON.stringify(theme.tokens)}))document.documentElement.style.setProperty('--z-'+name,value);delete window.codexProxyPlugin;window.__calls=[];window.codexProxyPlugin={version:2,async request(input){window.__calls.push(input);let value;
     if(input.path==='api/bootstrap')value=${JSON.stringify(boot)};
-    else if(input.path==='api/runs')value={runs:[]};
+    else if(input.path==='api/runs')value={runs:[],total:0,page:1,page_size:20};
     else if(input.path==='api/upstreams/check'){const source=${JSON.stringify(boot.sources)}.find(s=>s.method===JSON.parse(input.body).method);value={check:{method:source.method,status:'identical',checked_at:Date.now(),latest_commit:source.bundled_commit,ahead_by:0,behind_by:0,compare_url:source.url}}}
     else throw Error('unexpected sandbox request');
     return{status:200,contentType:'application/json',body:new TextEncoder().encode(JSON.stringify(value)).buffer}}};`

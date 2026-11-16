@@ -130,23 +130,37 @@ async fn write(
 pub(crate) async fn list(service: &Service, host: &HostClient) -> Result<Value, PluginFault> {
     let (items, _) = read(host).await?;
     let history = management::histories(host).await?;
-    let items: Vec<_> = items.into_iter().map(|item| {
-        let latest = history.iter().find(|(r, _)| Some(&r.id) == item.last_run_id.as_ref());
+    let mut output = vec![];
+    for item in items {
         let mut value = json!(item);
-        value["last_run"] = latest.map_or(Value::Null, |(run, _)| json!({"id":run.id,"status":run.status,"inflight":run.inflight,"report":run.report,"alert":run.scheduled.as_ref().map(|s| &s.alert),"task_error":run.task_error}));
+        let latest = match item.last_run_id.as_deref() {
+            Some(id) => match history.iter().find(|(run,_)|run.id==id) {
+                Some((run,_))=>Some(run.clone()),
+                None=>crate::history::find(service,host,id).await?,
+            },
+            None=>None,
+        };
+        value["last_run"] = latest.map_or(Value::Null, |run| json!({"id":run.id,"status":run.status,"inflight":run.inflight,"report":run.report,"alert":run.scheduled.as_ref().map(|s| &s.alert),"task_error":run.task_error}));
         if let Some(round) = &item.round {
             for (member, value) in round.members.iter().zip(value["round"]["members"].as_array_mut().unwrap()) {
-                value["run"] = history.iter().find(|(r, _)| Some(&r.id) == member.run_id.as_ref())
-                    .map_or(Value::Null, |(run, _)| {
-                        let mut value = run.summary();
-                        value["inflight"] = json!(run.inflight);
-                        value["alert"] = json!(run.scheduled.as_ref().map(|s| &s.alert));
-                        value
-                    });
+                let run = match member.run_id.as_deref() {
+                    Some(id)=>match history.iter().find(|(run,_)|run.id==id) {
+                        Some((run,_))=>Some(run.clone()),
+                        None=>crate::history::find(service,host,id).await?,
+                    },
+                    None=>None,
+                };
+                value["run"] = run.map_or(Value::Null, |run| {
+                    let mut value=run.summary();
+                    value["inflight"]=json!(run.inflight);
+                    value["alert"]=json!(run.scheduled.as_ref().map(|s|&s.alert));
+                    value
+                });
             }
         }
-        value
-    }).collect();
+        output.push(value);
+    }
+    let items=output;
     Ok(json!({"schedules":items,"alerts_configured":service.alerts.configured()}))
 }
 

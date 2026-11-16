@@ -19,7 +19,7 @@ pub fn registration() -> ManagementRegistration {
             ("GET", "api/account-groups"),
             ("POST", "api/upstreams/check"),
             ("POST", "api/models"),
-            ("GET", "api/runs"),
+            ("POST", "api/runs"),
             ("POST", "api/runs/get"),
             ("POST", "api/runs/start"),
             ("POST", "api/runs/step"),
@@ -106,7 +106,7 @@ pub(crate) async fn find(host: &HostClient, id: &str) -> Result<(Run, u64), Plug
         .await?
         .ok_or_else(|| invalid("检测记录不存在"))?;
     if run.id != id {
-        return Err(invalid("检测记录已超出 16 条历史保留窗口"));
+        return Err(invalid("检测记录已归档或已超出历史保留范围"));
     }
     Ok((run, version))
 }
@@ -213,12 +213,13 @@ async fn dispatch(
                     .map_err(|_| invalid("模型列表编码失败"))?,
             )
         }
-        ("GET", "api/runs") => reply(
-            json!({"runs":histories(&call.host).await?.iter().map(|(r,_)|r.summary()).collect::<Vec<_>>()}),
-        ),
+        ("POST", "api/runs") => reply(crate::history::list(service,&call.host,input(&call)?).await?),
         ("POST", "api/runs/get") => {
             let query: Identity = input(&call)?;
-            let (run, _) = find(&call.host, &query.id).await?;
+            let run = match host::read(&call.host, slot_from_id(&query.id)?).await? {
+                Some((run,_)) if run.id==query.id=>run,
+                _=>crate::history::find(service,&call.host,&query.id).await?.ok_or_else(||invalid("检测记录不存在或已超出历史保留范围"))?,
+            };
             reply(json!({"run":run.detail(),"busy":service.execution.available_permits()==0}))
         }
         ("POST", "api/runs/start") => start(service, &call.host, input(&call)?).await,
@@ -318,6 +319,9 @@ pub(crate) async fn create_run(
         return Err(invalid(
             "检测引擎返回的计划或报告不完整，未创建任务；请重新读取状态后重试",
         ));
+    }
+    if let Some((previous,_))=history.iter().find(|(previous,_)|previous.slot==slot) {
+        crate::history::store(service,host,previous).await?;
     }
     host::write(host, &run, version).await?;
     service.wake.notify_one();

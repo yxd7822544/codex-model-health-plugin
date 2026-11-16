@@ -137,7 +137,11 @@ export function installPreview() {
       return respond({saved:true})
     }
     if (input.path === 'api/models') return respond({models:['gpt-6-astra','gpt-5.6-sol']})
-    if (input.path === 'api/runs') return respond({runs:runs.map(summary)})
+    if (input.path === 'api/runs') {
+      const history=runs.filter(run=>!data.schedule_id || run.scheduled?.schedule_id===data.schedule_id).map(summary)
+      const size=data.page_size, page=Math.min(data.page,Math.max(1,Math.ceil(history.length/size)))
+      return respond({runs:history.slice((page-1)*size,page*size),total:history.length,page,page_size:size})
+    }
     if (input.path === 'api/runs/start') {
       const selected = methods.methods.find(m=>m.method===data.method)!
       const selectedAccount = previewAccounts.find(account=>account.id===data.account_id) ?? previewAccounts[0]!

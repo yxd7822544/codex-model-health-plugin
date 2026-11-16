@@ -38,7 +38,7 @@ try {
       return {groups: accountGroups()}
     }
     if (input.path === 'api/models') return { models: ['gpt-6-astra'] }
-    if (input.path === 'api/runs') return { runs: [] }
+    if (input.path === 'api/runs') return { runs: [], total:0, page:1, page_size:JSON.parse(input.body).page_size }
     if (input.path === 'api/schedules') return { schedules, alerts_configured: false }
     if (input.path === 'api/schedules/save') {
       const data = JSON.parse(input.body)

@@ -19,6 +19,8 @@ use tokio::io::{AsyncReadExt, DuplexStream, ReadHalf, WriteHalf};
 mod background;
 #[path = "support/stream.rs"]
 mod stream;
+#[path = "support/history.rs"]
+mod history;
 use stream::{json_wire, wire};
 
 struct Peer {
@@ -153,6 +155,7 @@ impl Peer {
             .unwrap()
     }
     async fn begin_api(&mut self, path: &str, input: Option<Value>) -> u64 {
+        let input=if path=="api/runs" {Some(input.unwrap_or(json!({"page":1,"page_size":100,"schedule_id":null})))} else {input};
         let id = self.sequence;
         self.sequence += 2;
         self.send(Frame {
@@ -346,6 +349,9 @@ async fn rpc_v7_cancelled_resume_cannot_be_revived_by_a_late_grant() {
 #[derive(Default)]
 struct Host {
     state: BTreeMap<String, (Value, u64)>,
+    archive: BTreeMap<String, (Value, u64)>,
+    reject_archive_write: bool,
+    reject_slot_replacement: bool,
     schedules: BTreeMap<String, (Value, u64)>,
     notifications: Vec<Value>,
     executions: Vec<Value>,
@@ -536,6 +542,10 @@ impl Host {
                 metadata(json!({"models":["gpt-6-astra"]}))
             }
             "host.state.get" => {
+                if params["namespace"].as_str().unwrap().starts_with("history-") {
+                    let record=self.archive.get(params["key"].as_str().unwrap()).map(|(value,version)|json!({"value":value,"version":version,"schema_version":1}));
+                    return metadata(json!({"record":record}));
+                }
                 let state = if params["namespace"] == "schedules" {
                     &self.schedules
                 } else {
@@ -548,6 +558,21 @@ impl Host {
                 metadata(json!({"record":record}))
             }
             "host.state.put" => {
+                if params["namespace"].as_str().unwrap().starts_with("history-") {
+                    if self.reject_archive_write {return Err(PluginFault::new(ErrorCode::Fault,"fixture archive unavailable"));}
+                    let key=params["key"].as_str().unwrap().to_owned();
+                    let slot:usize=key.strip_prefix("record-").unwrap().parse().unwrap();
+                    assert_eq!(params["namespace"],format!("history-{}",slot/72));
+                    assert!(slot<1008);
+                    let current=self.archive.get(&key).map(|(_,v)|*v);
+                    assert_eq!(current,params["expected_version"].as_u64());
+                    let version=current.unwrap_or(0)+1;
+                    self.archive.insert(key,(params["value"].clone(),version));
+                    return metadata(json!({"version":version}));
+                }
+                if self.reject_slot_replacement && params["namespace"]=="runs" && self.state.get(params["key"].as_str().unwrap()).is_some_and(|(old,_)|old["id"]!=params["value"]["id"]) {
+                    return Err(PluginFault::new(ErrorCode::Fault,"fixture replacement unavailable"));
+                }
                 if self.reject_schedule_commit
                     && params["namespace"] == "schedules"
                     && params["value"][0]["last_run_id"].is_string()

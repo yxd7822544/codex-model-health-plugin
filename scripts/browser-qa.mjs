@@ -56,7 +56,7 @@ async function finishTrace() {
   await page.getByText('Claude 家族',{exact:true}).waitFor()
 }
 async function assertNewAccountHistory(id, name) {
-  const {runs} = await page.evaluate(async()=>JSON.parse(new TextDecoder().decode((await window.codexProxyPlugin.request({method:'GET',path:'api/runs'})).body)))
+  const {runs} = await page.evaluate(async()=>JSON.parse(new TextDecoder().decode((await window.codexProxyPlugin.request({method:'POST',path:'api/runs',contentType:'application/json',body:JSON.stringify({page:1,page_size:100,schedule_id:null})})).body)))
   assert.equal(runs[0].account_id,id,'display labels must not change account ID binding')
   assert.equal(runs[0].account_name,name)
   await page.getByRole('button',{name:`查看 ${name} 的检测报告`,exact:true}).waitFor()
