@@ -167,8 +167,8 @@ pub(crate) async fn save(
         .account_ids
         .unwrap_or_else(|| vec![input.detection.account_id.clone()]);
     let unique: std::collections::HashSet<_> = account_ids.iter().collect();
-    if account_ids.is_empty() || account_ids.len() > 16 || unique.len() != account_ids.len() {
-        return Err(invalid("请选择 1～16 个不重复的检测账号"));
+    if account_ids.is_empty() || unique.len() != account_ids.len() {
+        return Err(invalid("请至少选择一个不重复的检测账号"));
     }
     input.detection.account_id = account_ids[0].clone();
     let catalog = service.engine.query(json!({"op":"catalog"})).await?;

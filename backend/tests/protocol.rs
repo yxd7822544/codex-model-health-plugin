@@ -355,6 +355,7 @@ struct Host {
     revision_changed: bool,
     refresh_each_request: bool,
     account_patch: Option<Value>,
+    account_ids: Vec<String>,
     repeat_cursor: bool,
     numeric_answer: bool,
     numeric_counts: VecDeque<usize>,
@@ -475,6 +476,10 @@ impl Host {
             "host.auth.list" => {
                 assert_eq!(params, json!({}));
                 let query: Value = serde_json::from_slice(&payload).unwrap();
+                if !self.account_ids.is_empty() {
+                    let body = json!({"accounts":self.account_ids.iter().map(|id|self.account(id)).collect::<Vec<_>>(),"next_cursor":null});
+                    return Ok((json!({}), serde_json::to_vec(&body).unwrap()));
+                }
                 let next = query["cursor"].is_null();
                 let body = json!({"accounts":[self.account(if next {"account-a"} else {"account-b"})],"next_cursor":if next || self.repeat_cursor {json!("account-a")}else{Value::Null}});
                 Ok((json!({}), serde_json::to_vec(&body).unwrap()))
@@ -547,7 +552,8 @@ impl Host {
                 metadata(json!({"version":version}))
             }
             "host.model.execute_stream" => {
-                assert!(matches!(params["account_id"].as_str(), Some("account-a" | "account-b")));
+                assert!(matches!(params["account_id"].as_str(), Some("account-a" | "account-b"))
+                    || self.account_ids.iter().any(|id| params["account_id"] == *id));
                 assert_eq!(params["client_key_id"], "key-b");
                 assert_eq!(params["provider"], "openai");
                 assert_eq!(params["protocol"], "openai");

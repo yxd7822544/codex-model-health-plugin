@@ -670,14 +670,50 @@ async fn paused_batch_member_allows_other_accounts_and_blocks_new_round_after_re
 }
 
 #[tokio::test]
-async fn schedule_rejects_empty_duplicate_unavailable_and_oversized_account_selection() {
+async fn schedule_rejects_empty_duplicate_and_unavailable_account_selection() {
     let mut peer = Peer::new().await;
     let mut host = Host::default();
-    for accounts in [json!([]),json!(["account-a","account-a"]),json!(["account-a","missing"]),json!((0..17).map(|i|format!("account-{i}")).collect::<Vec<_>>())] {
+    for accounts in [json!([]),json!(["account-a","account-a"]),json!(["account-a","missing"])] {
         let mut input=batch_input(); input["account_ids"]=accounts;
         assert!(peer.api("api/schedules/save",Some(input),&mut host).await.is_err());
     }
     assert!(host.schedules.is_empty() && host.state.is_empty() && host.executions.is_empty());
+}
+
+#[tokio::test]
+async fn schedule_saves_all_47_accounts_and_completes_beyond_the_history_window() {
+    let mut peer = Peer::configured(json!({})).await;
+    let account_ids: Vec<_> = (0..47).map(|i| format!("account-{i}")).collect();
+    let mut host = Host { numeric_answer: true, account_ids: account_ids.clone(), ..Default::default() };
+    let mut input = batch_input();
+    input["account_ids"] = json!(account_ids);
+    peer.api("api/schedules/save", Some(input), &mut host).await.unwrap();
+    let item = peer.api("api/schedules", None, &mut host).await.unwrap()["schedules"][0].clone();
+    assert_eq!(item["account_ids"], json!(account_ids));
+    assert_eq!(item["enabled"], false);
+    assert!(host.state.is_empty() && host.executions.is_empty());
+    peer.api("api/schedules/control", Some(json!({"id":item["id"],"revision":1,"action":"enable"})), &mut host).await.unwrap();
+
+    let mut bg = Background::new(peer, 3_600_000).await;
+    bg.until(&mut host, |h| h.executions.len() == 1).await;
+    assert_eq!(host.state.len(), 16);
+    assert!(host.schedules["items"].0[0]["next_run_at"].is_null());
+    bg.until(&mut host, |h| h.schedules["items"].0[0]["round"]["completed_at"].is_number()).await;
+    assert_eq!(host.executions.len(), 47 * 3);
+    for id in &account_ids {
+        assert_eq!(host.executions.iter().filter(|e| e["account_id"] == *id).count(), 3, "{id}");
+    }
+    assert_eq!(host.state.len(), 16);
+    assert!(host.notifications.is_empty());
+    let list = bg.api("api/schedules", None, &mut host).await.unwrap();
+    let item = &list["schedules"][0];
+    let members = item["round"]["members"].as_array().unwrap();
+    assert_eq!(members.len(), 47);
+    assert!(members.iter().all(|m| m["finished_at"].is_number() && m["error"].is_null()));
+    assert_eq!(members.iter().filter(|m| m["run"].is_object()).count(), 16);
+    let completed = members.iter().map(|m| m["finished_at"].as_u64().unwrap()).max().unwrap();
+    assert_eq!(item["next_run_at"], completed + 3_600_000);
+    bg.cancel(&mut host).await;
 }
 
 #[tokio::test]
