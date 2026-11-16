@@ -1,5 +1,6 @@
 //! 组合检测、定时任务和管理页面处理器
 mod alerts;
+mod account_groups;
 pub mod domain;
 pub mod engine;
 mod host;
@@ -29,6 +30,7 @@ pub(crate) struct Service {
     updates: updates::UpdateChecker,
     schedules: Mutex<()>,
     alerts: alerts::Settings,
+    host_api_base_url: String,
 }
 pub fn plugin(engine: engine::Engine) -> Result<ComposedPlugin, AuthorError> {
     plugin_with_configuration(engine, &serde_json::json!({}))
@@ -45,6 +47,7 @@ pub fn plugin_with_configuration(
         updates: updates::UpdateChecker::default(),
         schedules: Mutex::new(()),
         alerts: alerts::Settings::from_configuration(configuration),
+        host_api_base_url: configuration["hostApiBaseUrl"].as_str().unwrap_or("http://127.0.0.1:8080").to_owned(),
     });
     let maintenance = Arc::clone(&service);
     PluginBuilder::from_json(include_bytes!("../../plugin.json"))?

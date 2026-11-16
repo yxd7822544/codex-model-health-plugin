@@ -16,6 +16,7 @@ pub fn registration() -> ManagementRegistration {
     ManagementRegistration {
         routes: [
             ("GET", "api/bootstrap"),
+            ("GET", "api/account-groups"),
             ("POST", "api/upstreams/check"),
             ("POST", "api/models"),
             ("GET", "api/runs"),
@@ -170,6 +171,7 @@ async fn dispatch(
         runner::initialize(service, &call.host).await?;
     }
     match (call.request.method.as_str(), call.request.path.as_str()) {
+        ("GET", "api/account-groups") => reply(json!({"groups":crate::account_groups::list(&call.host, &service.host_api_base_url, &call.request).await?})),
         ("GET", "api/schedules") => reply(crate::schedules::list(service, &call.host).await?),
         ("POST", "api/schedules/save") => {
             reply(crate::schedules::save(service, &call.host, input(&call)?).await?)

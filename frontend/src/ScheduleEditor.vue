@@ -6,6 +6,9 @@ import type { Bootstrap } from './api'
 import { schedulesApi } from './api/schedules'
 import type { Schedule, ScheduleDraft } from './api/schedules'
 import { accountDisplayName } from './accountDisplay'
+import AccountGroupPicker from './AccountGroupPicker.vue'
+import { loadAccountGroups } from './api/accountGroups'
+import type { AccountGroup } from './api/accountGroups'
 
 const props = defineProps<{bootstrap: Bootstrap; schedule: Schedule | null}>()
 const open = defineModel<boolean>({required:true})
@@ -14,6 +17,7 @@ const draft = ref<ScheduleDraft>(empty())
 const pending = shallowRef<'save' | 'enable' | null>(null), error = shallowRef(''), modelsLoading = shallowRef(false)
 const saving = computed(()=>pending.value !== null)
 const models = shallowRef<string[]>([])
+const groups = shallowRef<AccountGroup[]>([]), groupsLoading = shallowRef(false), groupsReady = shallowRef(false), groupsError = shallowRef(''), groupsReload = ref(0)
 const catalog = computed(() => props.bootstrap.catalog.methods.find(m => m.method === draft.value.detection.method))
 const accounts = computed(() => props.bootstrap.accounts.map(a=>({value:a.id,label:accountDisplayName(a)})))
 const keys = computed(() => props.bootstrap.keys.map(k=>({value:k.id,label:k.name})))
@@ -21,13 +25,22 @@ const methods = computed(() => props.bootstrap.catalog.methods.map(m=>({value:m.
 const candidates = computed(() => catalog.value?.models.map(m=>({value:m.id,label:m.label || m.id})) ?? [])
 const tiers = computed(() => catalog.value?.tiers.map(t=>({value:t.id,label:`${t.count} 题`})) ?? [])
 const sampleCount = computed(() => catalog.value?.tiers.find(t=>t.id === draft.value.detection.tier)?.count ?? 0)
-const valid = computed(() => draft.value.name.trim() && draft.value.account_ids.length > 0 && draft.value.account_ids.every(id=>accounts.value.some(a=>a.value===id)) && draft.value.detection.key_id && models.value.includes(draft.value.detection.request_model) && draft.value.expected_model && Number.isInteger(draft.value.interval_minutes) && draft.value.interval_minutes >= 1 && draft.value.interval_minutes <= 43200 && !modelsLoading.value)
+const valid = computed(() => groupsReady.value && draft.value.name.trim() && draft.value.account_ids.length > 0 && draft.value.account_ids.every(id=>accounts.value.some(a=>a.value===id)) && draft.value.detection.key_id && models.value.includes(draft.value.detection.request_model) && draft.value.expected_model && Number.isInteger(draft.value.interval_minutes) && draft.value.interval_minutes >= 1 && draft.value.interval_minutes <= 43200 && !modelsLoading.value)
 function empty(): ScheduleDraft {return {name:'',interval_minutes:360,expected_model:'',account_ids:[],detection:{background:true,method:'modeltrace',account_id:'',key_id:'',request_model:'',claimed_model:'unified',tier:'fixed'}}}
 watch(open, value => {
   if (!value) return
   error.value = ''
   const item = props.schedule
   draft.value = item ? {id:item.id,revision:item.revision,name:item.name,interval_minutes:item.interval_minutes,expected_model:item.expected_model,account_ids:[...item.account_ids],detection:{...item.detection}} : empty()
+})
+watch(() => [open.value, groupsReload.value] as const, async ([visible], _, cleanup) => {
+  let current = true
+  cleanup(() => {current = false})
+  groups.value = []; groupsReady.value = false; groupsError.value = ''; groupsLoading.value = visible
+  if (!visible) return
+  try {const result = await loadAccountGroups(); if (current) {groups.value = result.groups; groupsReady.value = true}}
+  catch (cause) {if (current) groupsError.value = cause instanceof Error ? cause.message : String(cause)}
+  finally {if (current) groupsLoading.value = false}
 })
 watch(() => [open.value, draft.value.detection.key_id] as const, async ([visible,key], _, cleanup) => {
   let current = true
@@ -63,7 +76,7 @@ async function save(enable: boolean) {
       <div class="form-grid">
         <div class="field col-span-full"><label for="schedule-name">任务名称</label><ZInput id="schedule-name" v-model="draft.name" :maxlength="80" :disabled="saving" placeholder="例如 主账号模型巡检" /></div>
         <div class="field col-span-full"><label id="schedule-method">检测方法</label><ZSegmented v-model="draft.detection.method" :options="methods" aria-labelledby="schedule-method" :disabled="saving" @update:model-value="changeMethod" /></div>
-        <div class="field col-span-full"><div class="flex flex-wrap items-center justify-between gap-2"><label id="schedule-account">检测账号（可多选）</label><div class="flex items-center gap-2"><span class="text-z-xs text-z-text-secondary">已选 {{ draft.account_ids.length }} / {{ accounts.length }}</span><ZButton size="small" :disabled="saving || !accounts.length" @click="draft.account_ids=accounts.map(a=>a.value)">全选</ZButton><ZButton size="small" :disabled="saving || !draft.account_ids.length" @click="draft.account_ids=[]">清空</ZButton></div></div><ZSelect v-model="draft.account_ids" :options="accounts" aria-labelledby="schedule-account" :disabled="saving" placeholder="搜索并选择检测账号" multiple filterable collapse-tags collapse-tags-tooltip :max-collapse-tags="3" /></div>
+        <div class="field col-span-full"><div class="flex flex-wrap items-center justify-between gap-2"><label id="schedule-account">检测账号（按分组多选）</label><div class="flex items-center gap-2"><span class="text-z-xs text-z-text-secondary">已选 {{ draft.account_ids.length }} / {{ accounts.length }}</span><ZButton size="small" :disabled="saving || !groupsReady || !accounts.length" @click="draft.account_ids=accounts.map(a=>a.value)">全选</ZButton><ZButton size="small" :disabled="saving || !draft.account_ids.length" @click="draft.account_ids=[]">清空</ZButton></div></div><p v-if="groupsLoading" class="m-0 text-z-sm text-z-text-secondary">正在读取账号分组...</p><p v-else-if="groupsError" role="alert" class="m-0 sample-error">{{ groupsError }} <ZButton size="small" @click="groupsReload++">重试</ZButton></p><AccountGroupPicker v-else v-model="draft.account_ids" :accounts="bootstrap.accounts" :groups="groups" :disabled="saving" aria-labelledby="schedule-account" /></div>
         <div class="field"><label id="schedule-key">计量 Key</label><ZSelect v-model="draft.detection.key_id" :options="keys" aria-labelledby="schedule-key" :disabled="saving" placeholder="选择计量 Key" filterable /></div>
         <div class="field"><label id="schedule-model">测试模型</label><ZSelect v-model="draft.detection.request_model" :options="models.map(m=>({value:m,label:m}))" aria-labelledby="schedule-model" :disabled="saving || !draft.detection.key_id" :loading="modelsLoading" placeholder="先选择计量 Key" filterable /></div>
         <div class="field"><label id="schedule-expected">预期模型</label><ZSelect v-model="draft.expected_model" :options="candidates" aria-labelledby="schedule-expected" :disabled="saving" placeholder="选择报告应匹配的模型" filterable /></div>

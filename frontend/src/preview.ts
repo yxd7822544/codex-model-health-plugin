@@ -96,6 +96,7 @@ export function installPreview() {
     const data = input.body ? JSON.parse(input.body) : {}
     const respond=(value: unknown,status=200)=>({status,contentType:'application/json',body:new TextEncoder().encode(JSON.stringify(value)).buffer})
     if (params.get('scenario') === 'error') return respond({message:'模拟：宿主账号目录读取失败，请重试'},503)
+    if (input.path === 'api/account-groups') return respond({groups:[{id:'demo-group',name:'主账号分组',enabled:true,account_ids:params.get('scenario')==='empty'?[]:['demo-a','demo-b']},{id:'',name:'未分组',enabled:true,account_ids:params.get('scenario')==='empty'?[]:['demo-c']}]})
     if (input.path === 'api/bootstrap') return respond({catalog:methods,sources,accounts:params.get('scenario')==='empty'?[]:previewAccounts,keys:[{id:'demo-k',name:'模型体检专用',enabled:true}]})
     if (input.path === 'api/upstreams/check') {
       const source = sources.find(s=>s.method===data.method)!

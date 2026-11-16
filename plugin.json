@@ -11,7 +11,7 @@
   "runtime": "trustedProcess",
   "contributes": {"management": {"version": 2}, "maintenance": {"version": 1}},
   "resources": {"web/index.html":"text/html", "web/app.js":"text/javascript", "web/app.css":"text/css", "legal/LICENSE":"text/plain", "legal/NOTICE":"text/plain", "engine-legal/ENGINE-LICENSES.txt":"text/plain", "engine-legal/ENGINE-REQUIREMENTS.txt":"text/plain"},
-  "configurationSchema": {"type":"object","properties":{"feishuWebhook":{"type":"string","title":"飞书群机器人 Webhook","description":"可选，仅用于不匹配消息告警；未配置也可执行检测和查看历史，机器人关键词可设为 模型检测告警"}},"additionalProperties":false},
+  "configurationSchema": {"type":"object","properties":{"hostApiBaseUrl":{"type":"string","title":"宿主管理地址","description":"读取账号分组使用的本机地址，仅支持 HTTP 回环 IP 和端口；宿主监听端口不是 8080 时修改","default":"http://127.0.0.1:8080"},"feishuWebhook":{"type":"string","title":"飞书群机器人 Webhook","description":"可选，仅用于不匹配消息告警；未配置也可执行检测和查看历史，机器人关键词可设为 模型检测告警"}},"additionalProperties":false},
   "secretFields": ["feishuWebhook"],
   "state": [{
     "namespace":"runs", "schemaVersion":1,
