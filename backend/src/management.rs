@@ -1,3 +1,4 @@
+//! 管理接口与检测创建、推进和控制
 use crate::{
     Service,
     domain::{Method, Run, SLOTS, Status, slot_from_id},
@@ -22,6 +23,9 @@ pub fn registration() -> ManagementRegistration {
             ("POST", "api/runs/start"),
             ("POST", "api/runs/step"),
             ("POST", "api/runs/control"),
+            ("GET", "api/schedules"),
+            ("POST", "api/schedules/save"),
+            ("POST", "api/schedules/control"),
         ]
         .into_iter()
         .map(|(method, path)| ManagementRoute {
@@ -53,18 +57,18 @@ pub fn registration() -> ManagementRegistration {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
-struct Start {
+pub(crate) struct Start {
     #[serde(default)]
-    background: bool,
+    pub background: bool,
     #[serde(default)]
-    method: Method,
-    account_id: String,
-    key_id: String,
-    request_model: String,
-    claimed_model: String,
-    tier: String,
+    pub method: Method,
+    pub account_id: String,
+    pub key_id: String,
+    pub request_model: String,
+    pub claimed_model: String,
+    pub tier: String,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -166,6 +170,13 @@ async fn dispatch(
         runner::initialize(service, &call.host).await?;
     }
     match (call.request.method.as_str(), call.request.path.as_str()) {
+        ("GET", "api/schedules") => reply(crate::schedules::list(service, &call.host).await?),
+        ("POST", "api/schedules/save") => {
+            reply(crate::schedules::save(service, &call.host, input(&call)?).await?)
+        }
+        ("POST", "api/schedules/control") => {
+            reply(crate::schedules::control(service, &call.host, input(&call)?).await?)
+        }
         ("GET", "api/bootstrap") => {
             let catalog = service.engine.query(json!({"op":"catalog"})).await?;
             let accounts = host::accounts(&call.host)
@@ -226,6 +237,31 @@ async fn start(
     host: &HostClient,
     query: Start,
 ) -> Result<TypedReply<ManagementResponse>, PluginFault> {
+    let run = create_run(service, host, query, None).await?;
+    reply(json!({"run":run.detail()}))
+}
+
+pub(crate) async fn prepare(
+    service: &Service,
+    host: &HostClient,
+    query: &Start,
+) -> Result<Value, PluginFault> {
+    if !host::models(host, &query.key_id)
+        .await?
+        .models
+        .contains(&query.request_model)
+    {
+        return Err(invalid("当前 Key 的模型列表不包含所选模型"));
+    }
+    service.engine.query(json!({"op":"prepare","method":query.method,"tier":query.tier,"claimed_model":query.claimed_model,"request_model":query.request_model})).await
+}
+
+pub(crate) async fn create_run(
+    service: &Service,
+    host: &HostClient,
+    query: Start,
+    scheduled: Option<crate::schedules::ScheduledRun>,
+) -> Result<Run, PluginFault> {
     let account = host::accounts(host)
         .await?
         .into_iter()
@@ -236,14 +272,7 @@ async fn start(
         .into_iter()
         .find(|k| k.id == query.key_id)
         .ok_or_else(|| invalid("请选择已启用的测试 Key"))?;
-    if !host::models(host, &query.key_id)
-        .await?
-        .models
-        .contains(&query.request_model)
-    {
-        return Err(invalid("当前 Key 的模型列表不包含所选模型"));
-    }
-    let plan=service.engine.query(json!({"op":"prepare","method":query.method,"tier":query.tier,"claimed_model":query.claimed_model,"request_model":query.request_model})).await?;
+    let plan = prepare(service, host, &query).await?;
     let _lock = service.state.lock().await;
     let history = histories(host).await?;
     let slot = (0..SLOTS)
@@ -252,10 +281,10 @@ async fn start(
             history
                 .iter()
                 .rev()
-                .find(|(r, _)| r.finished())
+                .find(|(r, _)| r.replaceable())
                 .map(|(r, _)| r.slot)
         })
-        .ok_or_else(|| invalid("已有 16 个未结束任务，请先结束一个任务"))?;
+        .ok_or_else(|| PluginFault::new(ErrorCode::Capacity, "检测记录槽位已满，请结束未完成任务或等待告警处理完成"))?;
     let version = history
         .iter()
         .find(|(r, _)| r.slot == slot)
@@ -280,6 +309,7 @@ async fn start(
         background: query.background,
         queued_at: query.background.then(|| runner::queue_time(&history)),
         task_error: None,
+        scheduled,
     };
     update_report(service, &mut run).await?;
     if run.data_error().is_some() {
@@ -289,7 +319,7 @@ async fn start(
     }
     host::write(host, &run, version).await?;
     service.wake.notify_one();
-    reply(json!({"run":run.detail()}))
+    Ok(run)
 }
 
 async fn control(
@@ -455,6 +485,7 @@ pub(crate) async fn advance(
     let (mut latest, version) = find(host, id).await?;
     latest.finish_attempt(result)?;
     if background
+        && !latest.retryable_sample_error()
         && latest
             .attempts
             .last()

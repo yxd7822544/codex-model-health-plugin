@@ -1,3 +1,4 @@
+//! 检测记录、尝试预算与任务状态
 use crate::invalid;
 use gateway_plugin_sdk::PluginFault;
 use serde::{Deserialize, Serialize};
@@ -45,6 +46,8 @@ pub struct Run {
     pub queued_at: Option<u64>,
     #[serde(default)]
     pub task_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled: Option<crate::schedules::ScheduledRun>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug)]
@@ -129,6 +132,9 @@ impl Run {
     pub fn finished(&self) -> bool {
         matches!(self.status, Status::Completed | Status::Stopped) && self.inflight.is_none()
     }
+    pub fn replaceable(&self) -> bool {
+        self.finished() && self.scheduled.as_ref().is_none_or(|s| s.alert.done() && !s.awaiting_checkpoint)
+    }
     pub fn jobs(&self) -> &[Value] {
         self.plan["jobs"]
             .as_array()
@@ -139,6 +145,17 @@ impl Run {
         self.attempts
             .iter()
             .any(|a| a["job_id"] == job && a["status"] == "ok")
+    }
+    pub fn retryable_sample_error(&self) -> bool {
+        // 定时短答使用既有重试预算，传输错误和评分故障仍需人工处理
+        self.background
+            && self.scheduled.is_some()
+            && self.plan["method"] == "modeltrace"
+            && self.attempts.last().is_some_and(|sample| {
+                sample["status"] == "error"
+                    && sample["error"] == "insufficient_numbers"
+                    && sample["parsed_numbers"].as_u64().is_some()
+            })
     }
     pub fn next_job(&self) -> Option<String> {
         let ids: Vec<_> = self
@@ -193,7 +210,9 @@ impl Run {
         }
         self.status = if self.next_job().is_none() {
             Status::Completed
-        } else if self.attempts.last().is_some_and(|a| a["status"] == "error") {
+        } else if self.attempts.last().is_some_and(|a| a["status"] == "error")
+            && !self.retryable_sample_error()
+        {
             Status::Paused
         } else {
             Status::Ready
@@ -224,7 +243,8 @@ impl Run {
             "tier":self.plan["tier"],"baseline_hash":self.plan["hash"],"status":self.status,
             "attempts":self.attempts.len(),"planned":self.jobs().len(),"report":self.report,
             "background":self.background,"queued_at":self.queued_at,"task_error":self.task_error,
-            "data_error":self.data_error()})
+            "data_error":self.data_error(),
+            "scheduled":self.scheduled.as_ref().map(|s|json!({"schedule_id":s.schedule_id,"name":s.name,"due_at":s.due_at,"expected_model":s.expected_model,"alert":s.alert}))})
     }
 }
 
@@ -263,6 +283,7 @@ mod tests {
             background: false,
             queued_at: None,
             task_error: None,
+            scheduled: None,
         }
     }
     #[test]

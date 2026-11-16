@@ -1,8 +1,11 @@
+//! 组合检测、定时任务和管理页面处理器
+mod alerts;
 pub mod domain;
 pub mod engine;
 mod host;
 mod management;
 mod runner;
+mod schedules;
 mod updates;
 
 use gateway_plugin_sdk::{
@@ -24,14 +27,24 @@ pub(crate) struct Service {
     execution: Semaphore,
     wake: Notify,
     updates: updates::UpdateChecker,
+    schedules: Mutex<()>,
+    alerts: alerts::Settings,
 }
 pub fn plugin(engine: engine::Engine) -> Result<ComposedPlugin, AuthorError> {
+    plugin_with_configuration(engine, &serde_json::json!({}))
+}
+pub fn plugin_with_configuration(
+    engine: engine::Engine,
+    configuration: &serde_json::Value,
+) -> Result<ComposedPlugin, AuthorError> {
     let service = Arc::new(Service {
         engine,
         state: Mutex::new(RuntimeState::default()),
         execution: Semaphore::new(1),
         wake: Notify::new(),
         updates: updates::UpdateChecker::default(),
+        schedules: Mutex::new(()),
+        alerts: alerts::Settings::from_configuration(configuration),
     });
     let maintenance = Arc::clone(&service);
     PluginBuilder::from_json(include_bytes!("../../plugin.json"))?

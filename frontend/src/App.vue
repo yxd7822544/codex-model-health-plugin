@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onScopeDispose, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onScopeDispose, ref, watch } from 'vue'
 import { ZButton, ZCard, ZSelect, ZSegmented, ZTable, ZTag, ZIconButton, ZConfigProvider } from '@codex-proxy/ui'
 import type { TableColumn } from '@codex-proxy/ui'
 import { zhHans } from '@codex-proxy/ui/locale'
@@ -7,12 +7,16 @@ import { Play, Pause, Square, RefreshCw, FlaskConical, ArrowRight, Check, Finger
 import { api } from './api'
 import type { Bootstrap, Run, History, Method } from './api'
 import { accountDisplayName } from './accountDisplay'
-import { formatTime, methodText, runStatusText, tierText, verdict, tone, reasonText } from './presentation'
+import { alertStatusText, formatTime, methodText, runStatusText, tierText, verdict, tone, reasonText } from './presentation'
 import SourceUpdates from './SourceUpdates.vue'
 import AttemptTable from './AttemptTable.vue'
+import SchedulePanel from './SchedulePanel.vue'
 
 const preview = import.meta.env.DEV && new URLSearchParams(location.search).get('preview') === '1'
 const bootstrap = ref<Bootstrap | null>(null), history = ref<History[]>([]), run = ref<Run | null>(null)
+const historyFilter = ref<{id: string; name: string} | null>(null)
+const historySection = ref<HTMLElement | null>(null), reportSection = ref<HTMLElement | null>(null)
+const visibleHistory = computed(()=>historyFilter.value ? history.value.filter(item=>item.scheduled?.schedule_id===historyFilter.value!.id) : history.value)
 const loading = ref(true), error = ref(''), action = ref(false), connectionError = ref(''), modelsLoading = ref(false), starting = ref(false)
 const account = ref(''), key = ref(''), model = ref(''), claimed = ref(''), tier = ref('low'), models = ref<string[]>([])
 const method = ref<Method>('meow')
@@ -35,7 +39,7 @@ const candidates = computed<[string, number][]>(() => {
   const report = run.value?.report
   return report?.method === 'modeltrace' ? (report.analysis?.results.slice(0,5).map(r => [r.display_name,r.probability] as [string,number]) ?? []) : Object.entries(report?.matches ?? {}).sort((a,b) => b[1]-a[1])
 })
-const historyColumns: TableColumn<History>[] = [{key:'created_at',label:'检测时间',kind:'datetime',formatter:value=>formatTime(Number(value))},{key:'account_name',label:'账号',kind:'identity',size:'xl'},{key:'method',label:'检测方法',size:'lg',formatter:value=>methodText(value as Method | undefined)},{key:'request_model',label:'请求模型',kind:'mono',size:'lg'},{key:'tier',label:'检测档位',size:'lg',formatter:value=>tierText[String(value)]},{key:'result',label:'检测结果',kind:'custom',size:'xl'},{key:'actions',label:'操作',kind:'actions'}]
+const historyColumns: TableColumn<History>[] = [{key:'created_at',label:'检测时间',kind:'datetime',formatter:value=>formatTime(Number(value))},{key:'account_name',label:'账号',kind:'custom',size:'xl'},{key:'method',label:'检测方法',size:'lg',formatter:value=>methodText(value as Method | undefined)},{key:'request_model',label:'请求模型',kind:'mono',size:'lg'},{key:'tier',label:'检测档位',size:'lg',formatter:value=>tierText[String(value)]},{key:'result',label:'检测结果',kind:'custom',size:'xl'},{key:'actions',label:'操作',kind:'actions'}]
 const accountOptions = computed(() => bootstrap.value?.accounts.map(a => ({value:a.id,label:accountDisplayName(a)})) ?? [])
 
 function message(cause: unknown) { return cause instanceof Error ? cause.message : String(cause) }
@@ -107,7 +111,8 @@ async function control(command: string) {
   await operate(async () => { run.value = (await api<{run: Run}>('runs/control', {id:run.value!.id,action:command,...(command === 'resume' ? {background:true} : {})})).run; await loadHistory() })
   schedulePoll(0)
 }
-async function openRun(id: string) { await operate(async () => { run.value = (await api<{run: Run}>('runs/get',{id})).run }) }
+async function openRun(id: string) { await operate(async () => { run.value = (await api<{run: Run}>('runs/get',{id})).run }); await nextTick(); reportSection.value?.scrollIntoView({block:'start',behavior:'smooth'}) }
+async function showHistory(schedule: {id: string; name: string}) {historyFilter.value=schedule; await nextTick(); historySection.value?.scrollIntoView({block:'start',behavior:'smooth'}); void refreshStatus()}
 function visibility() { ++viewVersion; clearTimeout(pollTimer); if (document.visibilityState === 'visible') schedulePoll(0) }
 onMounted(() => { void load().finally(() => schedulePoll()); document.addEventListener('visibilitychange',visibility) })
 onScopeDispose(() => { disposed=true; ++viewVersion; clearTimeout(pollTimer); document.removeEventListener('visibilitychange',visibility) })
@@ -144,17 +149,19 @@ onScopeDispose(() => { disposed=true; ++viewVersion; clearTimeout(pollTimer); do
       <ZCard>
         <template #header><div class="flex items-center gap-2"><Fingerprint class="size-5 text-z-text-secondary" /><h2>如何理解结果</h2></div></template>
         <template #body>
-          <div class="explanation"><p>这里比较的是<span class="text-z-text font-emphasis">模型行为指纹</span>，不是智商分数，也不是模型身份认证</p><ul><li><Check class="size-4" /><span>锁定所选账号，由主服务使用其原有代理和凭据发送</span></li><li><Check class="size-4" /><span>错误、拒答和截断不算模型答错，失败后自动暂停</span></li><li><Check class="size-4" /><span>离开页面后仍在后台执行，服务重启后手动继续</span></li></ul><div class="baseline-meta"><span>检测引擎</span><strong>{{ methodText(method) }} {{ catalog?.engine_version ?? '—' }}</strong><span>基线版本</span><strong>{{ catalog?.version ?? '—' }}</strong></div><p v-if="method === 'modeltrace'" class="text-z-xs mb-0">概率只在候选库内比较，库外模型也会归到最接近的候选，不代表真实身份概率</p><p v-else class="text-z-xs mb-0">Meow 使用 GPT 行为基线，检测不会自动调整账号、路由或额度</p></div>
+          <div class="explanation"><p>这里比较的是<span class="text-z-text font-emphasis">模型行为指纹</span>，不是智商分数，也不是模型身份认证</p><ul><li><Check class="size-4" /><span>锁定所选账号，由主服务使用其原有代理和凭据发送</span></li><li><Check class="size-4" /><span>错误、拒答和截断不算模型答错，手动检测失败后暂停</span></li><li><Check class="size-4" /><span>离开页面后仍在后台执行，服务重启后手动继续</span></li></ul><div class="baseline-meta"><span>检测引擎</span><strong>{{ methodText(method) }} {{ catalog?.engine_version ?? '—' }}</strong><span>基线版本</span><strong>{{ catalog?.version ?? '—' }}</strong></div><p v-if="method === 'modeltrace'" class="text-z-xs mb-0">概率只在候选库内比较，库外模型也会归到最接近的候选，不代表真实身份概率</p><p v-else class="text-z-xs mb-0">Meow 使用 GPT 行为基线，检测不会自动调整账号、路由或额度</p></div>
           <SourceUpdates v-if="bootstrap" :sources="bootstrap.sources" />
         </template>
       </ZCard>
     </div>
 
-    <ZCard v-if="run && run.data_error">
+    <SchedulePanel v-if="bootstrap" :bootstrap="bootstrap" @open-run="openRun" @show-history="showHistory" />
+    <section v-if="run" ref="reportSection" aria-label="检测报告">
+    <ZCard v-if="run.data_error">
       <template #header><div class="flex flex-wrap items-center justify-between gap-3"><div class="flex items-center gap-2"><h2>{{ run.account_name || run.account_id }}</h2><ZTag type="warning">记录异常</ZTag></div><div class="flex gap-2"><ZIconButton aria-label="刷新当前任务" :disabled="action" @click="openRun(run.id)"><RefreshCw class="size-4" /></ZIconButton><ZButton v-if="!finished" size="small" :disabled="action" @click="control('stop')"><Square class="size-3" />结束检测</ZButton></div></div></template>
       <template #body><p class="sample-error" role="status">{{ run.data_error }}</p><p class="muted text-z-sm">{{ formatTime(run.created_at) }} · {{ run.key_name }} · 任务 {{ run.id }}</p><AttemptTable :attempts="run.attempts" /></template>
     </ZCard>
-    <ZCard v-else-if="run">
+    <ZCard v-else>
       <template #header><div class="flex flex-wrap items-center justify-between gap-3"><div><div class="flex flex-wrap items-center gap-2"><h2>{{ run.account_name }}</h2><ZTag :type="tone(run.report,run.status)">{{ runStatusText(run) }}</ZTag><ZTag>{{ methodText(run.plan.method) }}</ZTag></div><p class="subtitle">{{ run.plan.request_model }} <span class="mx-1">→</span> {{ run.plan.method === 'modeltrace' ? '统一候选库' : run.plan.claimed_model }} · {{ tierText[run.plan.tier] }}</p></div><div class="flex flex-wrap gap-2"><ZIconButton aria-label="刷新当前任务" :disabled="action" @click="openRun(run.id)"><RefreshCw class="size-4" /></ZIconButton><template v-if="!finished"><ZButton v-if="enqueued" size="small" :disabled="action" @click="control('pause')"><Pause class="size-4" />当前题完成后暂停</ZButton><ZButton v-else size="small" type="primary" :disabled="action || !!run.inflight" @click="control('resume')"><Play class="size-4" />继续检测</ZButton><ZButton size="small" :disabled="action" @click="control('stop')"><Square class="size-3" />结束检测</ZButton></template></div></div></template>
       <template #body>
         <div class="progress-facts"><div><span>有效样本</span><strong>{{ valid }} <small>/ {{ run.plan.jobs.length }}</small></strong></div><div><span>尝试（含中断）</span><strong>{{ run.attempts.length }} <small>/ {{ run.plan.jobs.length + run.plan.retry_budget }}</small></strong></div><div><span>失败 / 中断</span><strong>{{ failures }}</strong></div><div><span>检测结论</span><strong class="verdict-text">{{ verdict(run.report,run.status) }}</strong></div></div>
@@ -171,10 +178,13 @@ onScopeDispose(() => { disposed=true; ++viewVersion; clearTimeout(pollTimer); do
         <AttemptTable v-else :attempts="run.attempts" />
       </template>
     </ZCard>
+    </section>
+    <section ref="historySection" aria-label="检测执行记录">
     <ZCard>
-      <template #header><div class="flex flex-wrap justify-between gap-3"><div><h2>任务列表</h2><p class="subtitle">保留最近 16 条记录 · 报告沿用检测时的基线，不重新评分</p></div><ZTag class="self-start">{{ history.length }} 条</ZTag></div></template>
-      <template #body><ZTable :columns="historyColumns" :data="history" :loading="loading" empty-text="还没有检测记录。选择账号，开始第一次检测。"><template #result="{row}"><ZTag :type="row.data_error ? 'warning' : tone(row.report,row.status)">{{ row.data_error ? '记录异常' : row.status === 'completed' || row.status === 'stopped' ? verdict(row.report,row.status) : runStatusText(row) }}</ZTag></template><template #actions="{row}"><ZIconButton :aria-label="`查看 ${row.account_name || row.account_id} 的检测报告`" :disabled="action" @click="openRun(row.id)"><ArrowRight class="size-4" /></ZIconButton></template></ZTable></template>
+      <template #header><div class="flex flex-wrap justify-between gap-3"><div><h2>任务列表</h2><p class="subtitle">保留最近 16 条记录 · 报告沿用检测时的基线，不重新评分</p></div><div class="flex flex-wrap items-center gap-2"><ZTag v-if="historyFilter">{{ historyFilter.name }} · 执行历史</ZTag><ZButton v-if="historyFilter" size="small" @click="historyFilter=null">显示全部</ZButton><ZTag>{{ visibleHistory.length }} 条</ZTag></div></div></template>
+      <template #body><ZTable :columns="historyColumns" :data="visibleHistory" :loading="loading" :empty-text="historyFilter ? '此计划暂无保留的执行记录，启用后可在此查看结果' : '还没有检测记录。选择账号，开始第一次检测。'"><template #account_name="{row}"><div class="grid gap-1"><span>{{ row.account_name || row.account_id }}</span><span v-if="row.scheduled" class="text-z-xs text-z-text-secondary">定时 · {{ row.scheduled.name }}</span></div></template><template #result="{row}"><div class="grid justify-items-start gap-1"><ZTag :type="row.data_error ? 'warning' : tone(row.report,row.status)">{{ row.data_error ? '记录异常' : row.status === 'completed' || row.status === 'stopped' ? verdict(row.report,row.status) : runStatusText(row) }}</ZTag><span v-if="row.scheduled && (row.status === 'completed' || row.status === 'stopped')" class="text-z-xs" :class="row.scheduled.alert.status === 'failed' ? 'text-z-warning-text' : 'text-z-text-secondary'">{{ alertStatusText[row.scheduled.alert.status] }}</span></div></template><template #actions="{row}"><ZIconButton :aria-label="`查看 ${row.account_name || row.account_id} 的检测报告`" :disabled="action" @click="openRun(row.id)"><ArrowRight class="size-4" /></ZIconButton></template></ZTable></template>
     </ZCard>
+    </section>
   </main>
   </ZConfigProvider>
 </template>

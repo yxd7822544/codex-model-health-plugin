@@ -1,6 +1,7 @@
 import { applyTheme, createTheme } from '@codex-proxy/ui/theme'
 import type { Catalog, MethodCatalog, ModelTraceReport, Report, Run, History, UpstreamSource } from './api'
 import { accountDisplayName } from './accountDisplay'
+import type { Schedule } from './api/schedules'
 
 const params = new URLSearchParams(location.search)
 const sources: UpstreamSource[] = [
@@ -18,13 +19,43 @@ const previewAccounts = [
 function traceReport(valid: number): ModelTraceReport {return {method:'modeltrace',verdict:valid===3?'attributed':'insufficient',valid_samples:valid,planned_samples:3,reasons:valid===3?[]:['samples_incomplete'],analysis:valid?{prediction_name:'gpt-6-astra',family_prediction_name:'GPT',results:['gpt-6-astra','gpt-6-sol','gpt-5.6-sol','claude-opus-5','gpt-5.5'].map((model,i)=>({model,display_name:model,probability:[.84,.08,.03,.025,.025][i]!})),family_probabilities:[{family:'gpt',display_name:'GPT',probability:.975},{family:'claude',display_name:'Claude',probability:.025}]}:null}}
 function report(valid: number, total: number): Report { return {verdict:valid >= total*.6 ? 'match' : 'insufficient',model:valid>=total*.6 ? 'gpt-6-astra':null,valid_samples:valid,planned_samples:total,matches:{'gpt-6-astra':valid ? .987 : .333,'gpt-5.6-sol':valid ? .011 : .333,'other_known_external':valid ? .002 : .334},thresholds:{'gpt-6-astra':.92,'gpt-5.6-sol':.94,'other_known_external':.98},reasons:valid>=total*.6?[]:['samples_incomplete'],quality_status:valid>=total*.6?'sufficient':'insufficient_valid_samples'} }
 function example(id: string, total = 36): Run {return {id,created_at:Date.now()-3600000,updated_at:Date.now()-3500000,account_id:'demo-a',account_name:'主账号 A · 固定代理',key_name:'模型体检专用',status:'completed',inflight:null,plan:{engine_version:'4.5.4',id:catalog.id,version:catalog.version,hash:catalog.hash,tier:'low',claimed_model:'gpt-6-astra',request_model:'gpt-6-astra',jobs:Array.from({length:total},(_,i)=>({job_id:`probe-${i%6}:${Math.floor(i/6)}`})),retry_budget:Math.ceil(total/2)},attempts:Array.from({length:total},(_,i)=>({job_id:`probe-${i%6}:${Math.floor(i/6)}`,status:'ok',category:'cat',answer:'cat',request_id:`preview-request-${i+1}`})),report:report(total,total)}}
-function summary(r: Run): History {return {id:r.id,method:r.plan.method,created_at:r.created_at,account_name:r.account_name,account_id:r.account_id,key_name:r.key_name,request_model:r.plan.request_model,claimed_model:r.plan.claimed_model,tier:r.plan.tier,baseline_hash:r.plan.hash,status:r.status,attempts:r.attempts.length,planned:r.plan.jobs.length,report:r.report,background:r.background,queued_at:r.queued_at,task_error:r.task_error}}
+function summary(r: Run): History {return {id:r.id,method:r.plan.method,created_at:r.created_at,account_name:r.account_name,account_id:r.account_id,key_name:r.key_name,request_model:r.plan.request_model,claimed_model:r.plan.claimed_model,tier:r.plan.tier,baseline_hash:r.plan.hash,status:r.status,attempts:r.attempts.length,planned:r.plan.jobs.length,report:r.report,background:r.background,queued_at:r.queued_at,task_error:r.task_error,scheduled:r.scheduled}}
 
 export function installPreview() {
   applyTheme(document.documentElement,createTheme({scheme:params.get('theme') === 'dark' ? 'dark' : 'light'}))
   document.body.style.background='var(--z-color-bg-layout)'
   document.body.style.padding='24px'
   const runs: Run[] = params.get('scenario') === 'empty' ? [] : [example('0-1')]
+  const schedules: Schedule[] = []
+  let runSequence = 0
+  function refreshRound(item: Schedule) {
+    if (!item.round) return
+    for (const member of item.round.members) {
+      const r=runs.find(r=>r.id===member.run_id)
+      if (!r) continue
+      const finished=['completed','stopped'].includes(r.status) && !r.inflight
+      if (r.scheduled) r.scheduled.alert={status:finished ? r.status==='completed' && r.report.valid_samples===r.report.planned_samples && r.scheduled.expected_model!=='gpt-6-astra' ? params.get('alerts')==='missing' ? 'skipped' : 'sent' : 'not_required' : 'pending',attempts:0,error:null}
+      member.run={...r,task_error:r.task_error??null,alert:r.scheduled?.alert ?? null}
+      if (finished) member.finished_at=r.updated_at
+      if (r.id===item.last_run_id) item.last_run=member.run
+    }
+    if (item.round.completed_at===null && item.round.members.every(m=>m.finished_at!==null)) {
+      item.round.completed_at=Math.max(...item.round.members.map(m=>m.finished_at!))
+      item.next_run_at=item.enabled ? item.round.completed_at+item.interval_minutes*60000 : null
+    }
+  }
+  async function beginRound(item: Schedule) {
+    item.next_run_at=null
+    item.round={due_at:Date.now(),completed_at:null,members:item.account_ids.map(account_id=>({account_id,run_id:null,finished_at:null,error:null,run:null}))}
+    for (const member of item.round.members) {
+      const response=await window.codexProxyPlugin!.request({path:'api/runs/start',method:'POST',body:JSON.stringify({...item.detection,account_id:member.account_id})})
+      const {run}=JSON.parse(new TextDecoder().decode(response.body))
+      member.run_id=run.id; item.last_run_id=run.id
+      const saved = runs.find(r=>r.id===run.id)!
+      saved.scheduled={schedule_id:item.id,name:item.name,due_at:item.round.due_at,expected_model:item.expected_model,alert:{status:'pending',attempts:0,error:null}}
+    }
+    refreshRound(item)
+  }
   let draining = false
   async function sample(r: Run) {
     const job = r.plan.jobs.find(j=>!r.attempts.some(a=>a.job_id===j.job_id)) ?? r.plan.jobs.find(j=>!r.attempts.some(a=>a.job_id===j.job_id && a.status==='ok'))
@@ -34,13 +65,13 @@ export function installPreview() {
     r.attempts.push({job_id:job.job_id,status:'pending'})
     await new Promise(resolve=>setTimeout(resolve,700))
     const numeric=r.plan.method==='modeltrace'
-    const failed=numeric && params.get('scenario')==='short-answer' && i===0
+    const failed=numeric && ((params.get('scenario')==='short-answer' && i===0) || params.get('scenario')==='short-answer-exhausted')
     r.attempts[i]={job_id:job.job_id,status:failed?'error':'ok',error:failed?'insufficient_numbers':null,answer:numeric?'147, 23, 311, 88, 204, 17, 265, 134…':'cat',answer_truncated:numeric,request_id:`preview-request-${i+1}`}
     r.inflight=null
     const valid=r.attempts.filter(a=>a.status==='ok').length
     r.report=numeric?traceReport(valid):report(valid,r.plan.jobs.length); r.updated_at=Date.now()
     if (r.queued_at != null) {
-      r.status=failed?'paused':valid===r.plan.jobs.length?'completed':'ready'
+      r.status=failed && !r.scheduled?'paused':valid===r.plan.jobs.length || r.attempts.length>=r.plan.jobs.length+r.plan.retry_budget?'completed':'ready'
       if (r.status!=='ready') r.queued_at=null
     }
   }
@@ -52,6 +83,7 @@ export function installPreview() {
         const next=runs.filter(r=>r.queued_at!=null && r.status==='ready').sort((a,b)=>a.queued_at!-b.queued_at!)[0]
         if (!next) break
         await sample(next)
+        for (const item of schedules) refreshRound(item)
       }
     } finally { draining=false }
   }
@@ -70,12 +102,41 @@ export function installPreview() {
       const latest = status === 'identical' ? source.bundled_commit : 'a'.repeat(40)
       return respond({check:{method:source.method,status,checked_at:Date.now(),latest_commit:latest,ahead_by:status==='ahead'||status==='diverged'?2:0,behind_by:status==='behind'||status==='diverged'?1:0,compare_url:`${source.url}/compare/${source.bundled_commit}...${latest}`}})
     }
+    if (input.path === 'api/schedules') {
+      for (const item of schedules) {
+        refreshRound(item)
+        if (item.enabled && item.next_run_at!==null && item.next_run_at<=Date.now()) await beginRound(item)
+      }
+      return respond({schedules,alerts_configured:params.get('alerts') !== 'missing'})
+    }
+    if (input.path === 'api/schedules/save') {
+      const existing=schedules.find(s=>s.id===data.id)
+      const item = existing ?? {...data,id:String(Date.now()),revision:0,enabled:false,next_run_at:null,last_run_id:null,last_run:null,round:null,error:null}
+      Object.assign(item,data,{revision:item.revision+1,enabled:!!data.enable,next_run_at:null})
+      if (!existing) schedules.push(item)
+      if (data.enable) await beginRound(item)
+      return respond({saved:true})
+    }
+    if (input.path === 'api/schedules/control') {
+      const item=schedules.find(s=>s.id===data.id)
+      if (!item) return respond({message:'定时任务不存在'},400)
+      if (item.revision!==data.revision) return respond({message:'定时任务已更新，请刷新后操作'},400)
+      if (data.action==='delete') schedules.splice(schedules.indexOf(item),1)
+      else if(data.action==='enable' && !item.enabled) {item.enabled=true; if(!item.round || item.round.completed_at!==null) await beginRound(item)}
+      else if(data.action==='disable') {item.enabled=false; item.next_run_at=null}
+      else if(data.action==='run_now') {
+        if (item.round && item.round.completed_at===null) return respond({message:'本轮检测尚未结束'},400)
+        await beginRound(item)
+      }
+      item.revision++
+      return respond({saved:true})
+    }
     if (input.path === 'api/models') return respond({models:['gpt-6-astra','gpt-5.6-sol']})
     if (input.path === 'api/runs') return respond({runs:runs.map(summary)})
     if (input.path === 'api/runs/start') {
       const selected = methods.methods.find(m=>m.method===data.method)!
       const selectedAccount = previewAccounts.find(account=>account.id===data.account_id) ?? previewAccounts[0]!
-      const r=example(`1-${Date.now()}`,selected.tiers.find(t=>t.id===data.tier)!.count)
+      const r=example(`1-${Date.now()}${runSequence++}`,selected.tiers.find(t=>t.id===data.tier)!.count)
       Object.assign(r,{created_at:Date.now(),updated_at:Date.now(),status:'ready',background:true,queued_at:Date.now(),attempts:[],report:data.method==='modeltrace'?traceReport(0):report(0,r.plan.jobs.length)})
       r.account_id = selectedAccount.id
       r.account_name = accountDisplayName(selectedAccount)

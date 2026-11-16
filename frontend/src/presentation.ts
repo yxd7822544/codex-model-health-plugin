@@ -1,6 +1,7 @@
 import type { Method, Report, Status } from './api'
 export function methodText(method?: Method) { return method === 'modeltrace' ? 'ModelTrace' : 'Meow' }
 export const statusText: Record<Status, string> = {ready: '等待继续', running: '检测中', paused: '已暂停', completed: '已完成', stopped: '已结束'}
+export const alertStatusText = {pending:'等待告警',sending:'正在发送',sent:'已发送飞书',not_required:'无需告警',skipped:'未配置飞书，已跳过',failed:'告警失败'}
 export const tierText: Record<string, string> = {low: '快速检测', medium: '标准检测', high: '完整检测', fixed: '三轮检测'}
 export function verdict(report: Report, status: Status) {
   if (status !== 'completed' && status !== 'stopped') return '检测尚未结束'

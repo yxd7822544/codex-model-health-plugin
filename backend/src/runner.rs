@@ -1,4 +1,4 @@
-//! Host-owned maintenance call drives persisted jobs; the browser only observes.
+//! 使用宿主维护调用推进定时任务与检测队列
 use crate::{
     Service,
     domain::{Run, Status},
@@ -101,6 +101,8 @@ async fn cycle(service: &Service, host: &HostClient) -> Result<(), PluginFault> 
         if remaining <= HANDOFF_MARGIN {
             return Ok(());
         }
+        crate::schedules::tick(service, host).await?;
+        crate::alerts::deliver_pending(service, host).await?;
         // Notify retains an enqueue that arrives between reading state and waiting.
         let next = {
             let _lock = service.state.lock().await;

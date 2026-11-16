@@ -1,3 +1,4 @@
+//! 启动插件会话并读取宿主配置
 #[cfg(feature = "bundled-engine")]
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -12,11 +13,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if session.handshake().plugin_id != "local.model-health" {
         return Err("插件身份不匹配".into());
     }
-    session
-        .run(codex_model_health_plugin::plugin(
-            codex_model_health_plugin::engine::Engine::bundled()?,
-        )?)
-        .await?;
+    let plugin = codex_model_health_plugin::plugin_with_configuration(
+        codex_model_health_plugin::engine::Engine::bundled()?,
+        &session.handshake().configuration,
+    )?;
+    session.run(plugin).await?;
     Ok(())
 }
 #[cfg(not(feature = "bundled-engine"))]

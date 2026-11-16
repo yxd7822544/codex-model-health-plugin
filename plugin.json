@@ -11,9 +11,11 @@
   "runtime": "trustedProcess",
   "contributes": {"management": {"version": 2}, "maintenance": {"version": 1}},
   "resources": {"web/index.html":"text/html", "web/app.js":"text/javascript", "web/app.css":"text/css", "legal/LICENSE":"text/plain", "legal/NOTICE":"text/plain", "engine-legal/ENGINE-LICENSES.txt":"text/plain", "engine-legal/ENGINE-REQUIREMENTS.txt":"text/plain"},
+  "configurationSchema": {"type":"object","properties":{"feishuWebhook":{"type":"string","title":"飞书群机器人 Webhook","description":"可选，仅用于不匹配消息告警；未配置也可执行检测和查看历史，机器人关键词可设为 模型检测告警"}},"additionalProperties":false},
+  "secretFields": ["feishuWebhook"],
   "state": [{
     "namespace":"runs", "schemaVersion":1,
     "schema":{"type":"object", "required":["id","slot","plan","attempts","status"], "properties":{"id":{"type":"string","maxLength":100},"slot":{"type":"integer","minimum":0,"maximum":15},"plan":{"type":"object"},"attempts":{"type":"array","maxItems":162},"status":{"enum":["ready","running","paused","completed","stopped"]}}},
     "maximumRecords":16, "maximumBytes":4194304, "maximumValueBytes":262144, "migratesFrom":[]
-  }]
+  }, {"namespace":"schedules","schemaVersion":1,"schema":{"type":"array","maxItems":16,"items":{"type":"object"}},"maximumRecords":1,"maximumBytes":262144,"maximumValueBytes":262144,"migratesFrom":[]}]
 }

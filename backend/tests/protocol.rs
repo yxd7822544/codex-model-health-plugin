@@ -1,3 +1,4 @@
+//! 插件协议、状态与模型回调集成测试
 use gateway_plugin_sdk::{
     CallContext, ErrorCode, Frame, Handshake, Manifest, Message, PROTOCOL_VERSION, PluginFault,
     Stage,
@@ -33,6 +34,10 @@ impl Drop for Peer {
 }
 impl Peer {
     async fn new() -> Self {
+        Self::configured(json!({"feishuWebhook":"https://open.feishu.cn/open-apis/bot/v2/hook/test-id"})).await
+    }
+
+    async fn configured(configuration: Value) -> Self {
         #[cfg(feature = "bundled-engine")]
         let engine = codex_model_health_plugin::engine::Engine::bundled().unwrap();
         #[cfg(not(feature = "bundled-engine"))]
@@ -76,10 +81,16 @@ impl Peer {
                 };
             codex_model_health_plugin::engine::Engine::command(command)
         };
-        Self::with_engine(engine).await
+        Self::with_configuration(engine, configuration).await
     }
 
     async fn with_engine(engine: codex_model_health_plugin::engine::Engine) -> Self {
+        Self::with_configuration(engine, json!({})).await
+    }
+    async fn with_configuration(
+        engine: codex_model_health_plugin::engine::Engine,
+        configuration: Value,
+    ) -> Self {
         let (host, transport) = tokio::io::duplex(2 * 1024 * 1024);
         let (reader, writer) = tokio::io::split(transport);
         let task = tokio::spawn(async move {
@@ -89,8 +100,12 @@ impl Peer {
             session
                 .set_call_budgets(codex_model_health_plugin::call_budgets())
                 .unwrap();
+            let configuration = session.handshake().configuration.clone();
             session
-                .run(codex_model_health_plugin::plugin(engine).unwrap())
+                .run(
+                    codex_model_health_plugin::plugin_with_configuration(engine, &configuration)
+                        .unwrap(),
+                )
                 .await
                 .unwrap();
         });
@@ -110,7 +125,7 @@ impl Peer {
                 instance_id: "test".into(),
                 generation: 1,
                 incarnation: "test".into(),
-                configuration: json!({}),
+                configuration,
                 contributes: manifest.contributes,
             },
         }))
@@ -331,6 +346,8 @@ async fn rpc_v7_cancelled_resume_cannot_be_revived_by_a_late_grant() {
 #[derive(Default)]
 struct Host {
     state: BTreeMap<String, (Value, u64)>,
+    schedules: BTreeMap<String, (Value, u64)>,
+    notifications: Vec<Value>,
     executions: Vec<Value>,
     bodies: Vec<Value>,
     fail: bool,
@@ -340,6 +357,7 @@ struct Host {
     account_patch: Option<Value>,
     repeat_cursor: bool,
     numeric_answer: bool,
+    numeric_counts: VecDeque<usize>,
     model_events: Option<VecDeque<ExecutionEvent>>,
     model_read_reply: Option<(Value, Vec<u8>)>,
     model_open: bool,
@@ -350,6 +368,7 @@ struct Host {
     http_requests: Vec<Value>,
     http_failure: bool,
     reject_completed_write: bool,
+    reject_schedule_commit: bool,
 }
 fn account(id: &str, revision: u64) -> Value {
     json!({"account_id":id,"provider_id":"openai","credential_revision":revision,"name":id,"email":null,"upstream_user_id":format!("user-{id}"),"upstream_account_id":format!("upstream-{id}"),"plan_type":"pro","authentication_kind":"oauth","enabled":true,"credential_state":"ready","has_refresh_token":true,"access_token_expires_at_ms":null,"next_refresh_at_ms":null})
@@ -381,6 +400,18 @@ impl Host {
         let metadata = |value| Ok((value, vec![]));
         match method {
             "host.http.do_stream" => {
+                if params["method"] == "POST" {
+                    self.notifications
+                        .push(serde_json::from_slice(&payload).unwrap());
+                    let (status, body) = self
+                        .http
+                        .pop_front()
+                        .unwrap_or((200, br#"{"code":0}"#.to_vec()));
+                    self.http_body = Some(body);
+                    return metadata(
+                        json!({"status":status,"http_version":"HTTP/1.1","headers":[],"stream":"github","trailers":[]}),
+                    );
+                }
                 assert!(payload.is_empty());
                 assert_eq!(params["method"], "GET");
                 assert!(
@@ -468,14 +499,28 @@ impl Host {
                 metadata(json!({"models":["gpt-6-astra"]}))
             }
             "host.state.get" => {
-                assert_eq!(params["namespace"], "runs");
-                let record = self.state.get(params["key"].as_str().unwrap()).map(
+                let state = if params["namespace"] == "schedules" {
+                    &self.schedules
+                } else {
+                    assert_eq!(params["namespace"], "runs");
+                    &self.state
+                };
+                let record = state.get(params["key"].as_str().unwrap()).map(
                     |(value, version)| json!({"value":value,"version":version,"schema_version":1}),
                 );
                 metadata(json!({"record":record}))
             }
             "host.state.put" => {
-                assert_eq!(params["namespace"], "runs");
+                if self.reject_schedule_commit
+                    && params["namespace"] == "schedules"
+                    && params["value"][0]["last_run_id"].is_string()
+                {
+                    self.reject_schedule_commit = false;
+                    return Err(PluginFault::new(
+                        ErrorCode::Fault,
+                        "fixture schedule commit failed",
+                    ));
+                }
                 if self.reject_completed_write
                     && params["value"]["attempts"]
                         .as_array()
@@ -487,16 +532,22 @@ impl Host {
                     ));
                 }
                 let key = params["key"].as_str().unwrap().to_string();
-                let current = self.state.get(&key).map(|(_, v)| *v);
+                let state = if params["namespace"] == "schedules" {
+                    &mut self.schedules
+                } else {
+                    assert_eq!(params["namespace"], "runs");
+                    &mut self.state
+                };
+                let current = state.get(&key).map(|(_, v)| *v);
                 if current != params["expected_version"].as_u64() {
                     return Err(PluginFault::new(ErrorCode::Conflict, "CAS conflict"));
                 }
                 let version = current.unwrap_or(0) + 1;
-                self.state.insert(key, (params["value"].clone(), version));
+                state.insert(key, (params["value"].clone(), version));
                 metadata(json!({"version":version}))
             }
             "host.model.execute_stream" => {
-                assert_eq!(params["account_id"], "account-b");
+                assert!(matches!(params["account_id"].as_str(), Some("account-a" | "account-b")));
                 assert_eq!(params["client_key_id"], "key-b");
                 assert_eq!(params["provider"], "openai");
                 assert_eq!(params["protocol"], "openai");
@@ -543,7 +594,7 @@ impl Host {
                         .unwrap()
                         .to_lowercase();
                     let answer = if self.numeric_answer {
-                        (0..332)
+                        (0..self.numeric_counts.pop_front().unwrap_or(332))
                             .map(|i| (1 + (i * 37 + 13) % 355).to_string())
                             .collect::<Vec<_>>()
                             .join(",")
