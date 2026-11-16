@@ -1,8 +1,8 @@
 //! 定时检测配置、启停及到期入队，复用逐题执行与持久化合同
 use crate::{
     Service,
-    alerts::Delivery,
-    domain::{Method, Run},
+    alerts::{Delivery, DeliveryStatus},
+    domain::{Method, Run, Status},
     host, invalid,
     management::{self, Start},
     now_ms, now_nanos,
@@ -314,6 +314,7 @@ pub(crate) async fn control(
 pub(crate) async fn tick(service: &Service, host: &HostClient) -> Result<(), PluginFault> {
     let _guard = service.schedules.lock().await;
     let (mut items, mut version) = read(host).await?;
+    finish_paused(service, host).await?;
     acknowledge(service, host, &items).await?;
     for index in 0..items.len() {
         let mut item = items[index].clone();
@@ -391,6 +392,7 @@ pub(crate) async fn tick(service: &Service, host: &HostClient) -> Result<(), Plu
                 }
                 if run.finished() {
                     member.finished_at = Some(run.updated_at);
+                    member.error = run.task_error.clone();
                     changed = true;
                 }
                 continue;
@@ -449,6 +451,25 @@ pub(crate) async fn tick(service: &Service, host: &HostClient) -> Result<(), Plu
         }
     }
     acknowledge(service, host, &items).await?;
+    Ok(())
+}
+
+async fn finish_paused(service: &Service, host: &HostClient) -> Result<(), PluginFault> {
+    let _guard = service.state.lock().await;
+    for (mut run, version) in management::histories(host).await? {
+        if run.scheduled.is_none() || run.status != Status::Paused || run.inflight.is_some() {
+            continue;
+        }
+        // 单个账号结束本轮尝试，保留错误；进度落盘前仍不能回收槽位。
+        run.status = Status::Stopped;
+        run.queued_at = None;
+        run.updated_at = now_ms();
+        run.task_error.get_or_insert_with(|| "检测已暂停，本轮已跳过该账号".into());
+        let scheduled = run.scheduled.as_mut().unwrap();
+        scheduled.awaiting_checkpoint = true;
+        scheduled.alert.status = DeliveryStatus::NotRequired;
+        host::write(host, &run, Some(version)).await?;
+    }
     Ok(())
 }
 

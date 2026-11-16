@@ -67,6 +67,14 @@ pub(crate) async fn initialize(service: &Service, host: &HostClient) -> Result<(
         if interrupted {
             run.recover()?;
         }
+        // 定时队列中已落盘、尚无在途请求的任务可继续，单个中断不能跳过其他账号。
+        if run.scheduled.is_some()
+            && !interrupted
+            && run.status == Status::Ready
+            && run.queued_at.is_some()
+        {
+            continue;
+        }
         // Existing user pauses keep their reason. No scoring is required to pause.
         if run.status != Status::Paused || interrupted || run.queued_at.is_some() {
             pause(&mut run, &reason);

@@ -33,10 +33,14 @@ export function installPreview() {
     for (const member of item.round.members) {
       const r=runs.find(r=>r.id===member.run_id)
       if (!r) continue
+      if (r.status==='paused' && !r.inflight) {
+        r.status='stopped'; r.queued_at=null; r.updated_at=Date.now()
+        r.task_error ||= '检测已暂停，本轮已跳过该账号'
+      }
       const finished=['completed','stopped'].includes(r.status) && !r.inflight
       if (r.scheduled) r.scheduled.alert={status:finished ? r.status==='completed' && r.report.valid_samples===r.report.planned_samples && r.scheduled.expected_model!=='gpt-6-astra' ? params.get('alerts')==='missing' ? 'skipped' : 'sent' : 'not_required' : 'pending',attempts:0,error:null}
       member.run={...r,task_error:r.task_error??null,alert:r.scheduled?.alert ?? null}
-      if (finished) member.finished_at=r.updated_at
+      if (finished) {member.finished_at=r.updated_at; member.error=r.task_error??null}
       if (r.id===item.last_run_id) item.last_run=member.run
     }
     if (item.round.completed_at===null && item.round.members.every(m=>m.finished_at!==null)) {

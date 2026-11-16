@@ -352,6 +352,7 @@ struct Host {
     bodies: Vec<Value>,
     fail: bool,
     execute_error: Option<PluginFault>,
+    execute_errors: BTreeMap<String, PluginFault>,
     revision_changed: bool,
     refresh_each_request: bool,
     account_patch: Option<Value>,
@@ -561,13 +562,14 @@ impl Host {
                 assert!(self.state.values().any(|(v, _)| v["inflight"].is_string()
                     && v["attempts"].as_array().unwrap().last().unwrap()["status"] == "pending"));
                 assert!(!self.model_open, "previous model stream was not released");
+                let account_id = params["account_id"].as_str().unwrap().to_owned();
                 self.executions.push(params);
                 let body: Value = serde_json::from_slice(&payload).unwrap();
                 assert_eq!(body["stream"], true);
                 assert_eq!(body["store"], false);
                 assert!(body["tools"].is_null());
                 self.bodies.push(body);
-                if let Some(error) = self.execute_error.take() {
+                if let Some(error) = self.execute_errors.remove(&account_id).or_else(|| self.execute_error.take()) {
                     return Err(error);
                 }
                 self.model_open = true;

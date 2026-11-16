@@ -147,7 +147,7 @@ impl Run {
             .any(|a| a["job_id"] == job && a["status"] == "ok")
     }
     pub fn retryable_sample_error(&self) -> bool {
-        // 定时短答使用既有重试预算，传输错误和评分故障仍需人工处理
+        // 定时短答使用既有重试预算，其他错误结束该账号本轮检测。
         self.background
             && self.scheduled.is_some()
             && self.plan["method"] == "modeltrace"

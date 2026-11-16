@@ -35,6 +35,12 @@ try {
       schedules = [{ ...data, id: 'schedule-47', revision: 1, enabled: false, next_run_at: null, last_run_id: null, last_run: null, round: null, error: null }]
       return { saved: true }
     }
+    if (input.path === 'api/schedules/control') {
+      const data = JSON.parse(input.body)
+      assert.equal(data.action, 'delete')
+      schedules = schedules.filter(item => item.id !== data.id)
+      return { saved: true }
+    }
     throw new Error(`unexpected page call: ${input.path}`)
   })
   await context.addInitScript(() => {
@@ -77,6 +83,24 @@ try {
   await dialog.getByText('已选 47 / 47', { exact: true }).waitFor()
   await dialog.getByRole('button', { name: '取消', exact: true }).click()
 
+  // A finished round with recycled failed reports must retain errors and unlock editing/deletion.
+  const completed = Date.now()
+  schedules[0].round = { due_at: completed - 60000, completed_at: completed, members: accounts.map((account, index) => ({ account_id: account.id, run_id: `run-${index}`, finished_at: completed, error: index < 20 ? `账号 ${index} 授权失败，本轮已跳过` : null, run: null })) }
+  await page.reload()
+  const row = page.getByRole('row').filter({ hasText: '47 个账号巡检' })
+  await row.getByText('已结束 47 / 47 个账号', { exact: true }).waitFor()
+  await row.getByText('部分账号检测失败或已跳过，请查看本轮', { exact: true }).waitFor()
+  assert.equal(await row.getByRole('button', { name: '编辑', exact: true }).isEnabled(), true)
+  assert.equal(await row.getByRole('button', { name: '删除', exact: true }).isEnabled(), true)
+  await row.getByRole('button', { name: '查看本轮', exact: true }).click()
+  await dialog.getByText('账号 0 授权失败，本轮已跳过', { exact: true }).waitFor()
+  await page.keyboard.press('Escape')
+  await dialog.waitFor({ state: 'hidden' })
+  await row.getByRole('button', { name: '删除', exact: true }).click()
+  await dialog.getByRole('button', { name: '删除', exact: true }).click()
+  await row.waitFor({ state: 'hidden' })
+  assert.equal(schedules.length, 0)
+
   // The denominator follows the returned directory rather than a fixed 16 or 47.
   for (const count of [48, 0]) {
     accounts = Array.from({ length: count }, (_, i) => ({ id: `account-${i}`, name: `Codex ${i}`, email: null, plan: 'pro' }))
@@ -92,7 +116,7 @@ try {
     await dialog.getByRole('button', { name: '取消', exact: true }).click()
   }
   assert.deepEqual(errors, [])
-  console.log('Schedule editor passed: select/clear/save/reopen 47 accounts; dynamic counts for 48 and 0 accounts.')
+  console.log('Schedules passed: 47-account selection, dynamic counts, retained failure reasons, and edit/delete after completion.')
 } finally {
   await browser.close()
 }
