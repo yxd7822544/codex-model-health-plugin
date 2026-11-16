@@ -361,6 +361,7 @@ struct Host {
     group_pages: Vec<Vec<Value>>,
     group_requests: Vec<Value>,
     group_status: u16,
+    group_account_requests: Vec<Value>,
     repeat_cursor: bool,
     numeric_answer: bool,
     numeric_counts: VecDeque<usize>,
@@ -416,6 +417,21 @@ impl Host {
                     self.group_requests.push(params);
                     self.http_body = Some(serde_json::to_vec(&json!({"code":200,"data":{"items":self.group_pages.get(index).cloned().unwrap_or_default(),"page":{"page":index+1,"totalPages":self.group_pages.len().max(1)}}})).unwrap());
                     return metadata(json!({"status":if self.group_status==0 {200} else {self.group_status},"http_version":"HTTP/1.1","headers":[],"stream":"github","trailers":[]}));
+                }
+                if params["url"].as_str().unwrap().starts_with("http://127.0.0.1:8080/api/admin/accounts?") {
+                    assert_eq!(params["method"], "GET"); assert!(payload.is_empty());
+                    let headers: Vec<(String, Vec<u8>)> = serde_json::from_value(params["headers"].clone()).unwrap();
+                    assert_eq!(headers[0],("Cookie".into(),b"cpr_session=fixture-session".to_vec()));
+                    let index=self.group_account_requests.len();
+                    assert!(params["url"].as_str().unwrap().ends_with(&format!("page={}&pageSize=100&provider=openai",index+1)));
+                    self.group_account_requests.push(params);
+                    let ids=if self.account_ids.is_empty() {vec!["account-a".to_owned(),"account-b".to_owned()]} else {self.account_ids.clone()};
+                    let accounts: Vec<_>=ids.iter().skip(index*100).take(100).map(|id| {
+                        let account=self.account(id);
+                        json!({"id":id,"provider":account["provider_id"],"enabled":account["enabled"],"groups":self.account_groups.get(id).cloned().unwrap_or_default().iter().map(|id|json!({"id":id})).collect::<Vec<_>>()})
+                    }).collect();
+                    self.http_body=Some(serde_json::to_vec(&json!({"code":200,"data":{"items":accounts,"page":{"page":index+1,"totalPages":ids.len().div_ceil(100)}}})).unwrap());
+                    return metadata(json!({"status":200,"http_version":"HTTP/1.1","headers":[],"stream":"github","trailers":[]}));
                 }
                 if params["method"] == "POST" {
                     self.notifications
@@ -488,18 +504,6 @@ impl Host {
                 assert_eq!(params["stream"], "github");
                 assert!(self.http_body.take().is_some());
                 metadata(json!({}))
-            }
-            "host.data.accounts.list" => {
-                assert_eq!(params, json!({}));
-                let query: Value = serde_json::from_slice(&payload).unwrap();
-                assert_eq!(query["provider_id"], "openai");
-                let next = query["cursor"].is_null();
-                let ids = if self.account_ids.is_empty() { vec![if next {"account-a".to_owned()} else {"account-b".to_owned()}] } else {self.account_ids.clone()};
-                let values: Vec<_> = ids.iter().map(|id| {
-                    let account=self.account(id);
-                    json!({"account_id":id,"provider_id":account["provider_id"],"name":account["name"],"email":account["email"],"enabled":account["enabled"],"group_ids":self.account_groups.get(id).cloned().unwrap_or_default(),"updated_at_ms":0})
-                }).collect();
-                Ok((json!({}),serde_json::to_vec(&json!({"schema_version":1,"accounts":values,"next_cursor":if self.account_ids.is_empty() && (next || self.repeat_cursor) {json!("account-a")} else {Value::Null}})).unwrap()))
             }
             "host.auth.list" => {
                 assert_eq!(params, json!({}));
@@ -693,6 +697,20 @@ async fn account_group_directory_pages_memberships_and_keeps_ungrouped_separate(
 }
 
 #[tokio::test]
+async fn account_group_members_use_all_admin_account_pages_without_sdk_group_projection() {
+    let mut peer=Peer::new().await;
+    let ids: Vec<_>=(0..205).map(|i|format!("account-{i}")).collect();
+    let mut host=Host {account_ids:ids.clone(),group_pages:vec![vec![json!({"id":"group-a","name":"完整分组","enabled":true})]],..Default::default()};
+    for id in &ids[..150] {host.account_groups.insert(id.clone(),vec!["group-a".into()]);}
+    let result=peer.api("api/account-groups",None,&mut host).await.unwrap();
+    assert_eq!(result["groups"][0]["account_ids"],json!(ids[..150]));
+    assert_eq!(result["groups"][1]["account_ids"],json!(ids[150..]));
+    assert_eq!(host.group_account_requests.len(),3);
+    assert!(host.callbacks.iter().all(|method|method.starts_with("host.http.")));
+    assert!(host.executions.is_empty() && host.http_body.is_none());
+}
+
+#[tokio::test]
 async fn account_groups_filter_disabled_accounts_and_reject_incomplete_catalogs() {
     for disabled in [true,false] {
         let mut peer=Peer::new().await;
@@ -707,7 +725,7 @@ async fn account_groups_filter_disabled_accounts_and_reject_incomplete_catalogs(
     let mut host=Host {group_status:401,..Default::default()};
     assert!(peer.api("api/account-groups",None,&mut host).await.is_err());
     assert!(host.http_body.is_none() && host.executions.is_empty());
-    let mut host=Host {repeat_cursor:true,..Default::default()};
+    let mut host=Host {group_pages:vec![vec![];101],..Default::default()};
     assert!(peer.api("api/account-groups",None,&mut host).await.is_err());
 }
 

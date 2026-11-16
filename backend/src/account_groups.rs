@@ -1,11 +1,11 @@
-//! 用宿主分组目录和账号事实生成可勾选的分组，不保存管理员会话。
+//! 从宿主管理目录读取分组和成员，不保存管理员会话。
 use crate::invalid;
 use gateway_plugin_sdk::{
     ErrorCode, PluginFault,
-    call::{data::AccountFactsQuery, host::HttpRequest, management::ManagementRequest},
+    call::{host::HttpRequest, management::ManagementRequest},
     client::HostClient,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
     collections::{BTreeMap, BTreeSet},
     net::SocketAddr,
@@ -22,13 +22,13 @@ pub(crate) struct Group {
 }
 
 #[derive(Deserialize)]
-struct Envelope {
+struct Envelope<T> {
     code: u16,
-    data: GroupPage,
+    data: ListPage<T>,
 }
 #[derive(Deserialize)]
-struct GroupPage {
-    items: Vec<Group>,
+struct ListPage<T> {
+    items: Vec<T>,
     page: Page,
 }
 #[derive(Deserialize)]
@@ -36,6 +36,18 @@ struct Page {
     page: u32,
     #[serde(rename = "totalPages")]
     total_pages: u32,
+}
+
+#[derive(Deserialize)]
+struct Account {
+    id: String,
+    provider: String,
+    enabled: bool,
+    groups: Vec<GroupRef>,
+}
+#[derive(Deserialize)]
+struct GroupRef {
+    id: String,
 }
 
 fn origin(value: &str) -> Result<String, PluginFault> {
@@ -84,52 +96,67 @@ pub(crate) async fn list(
         .map_err(|_| PluginFault::new(ErrorCode::Timeout, "读取账号分组超时，请重试"))?
 }
 
+async fn page<T: DeserializeOwned>(
+    host: &HostClient,
+    base: &str,
+    path: &str,
+    number: u32,
+    cookie: &[u8],
+) -> Result<ListPage<T>, PluginFault> {
+    let mut response = host
+        .http(
+            HttpRequest {
+                method: "GET".into(),
+                url: format!("{base}{path}"),
+                headers: vec![
+                    ("Cookie".into(), cookie.to_vec()),
+                    ("Accept".into(), b"application/json".to_vec()),
+                ],
+            },
+            vec![],
+        )
+        .await
+        .map_err(|_| invalid("无法连接宿主分组目录，请检查插件设置中的宿主管理地址"))?;
+    if response.status != 200 {
+        let status = response.status;
+        let _ = response.body.close().await;
+        return Err(invalid(format!(
+            "读取宿主分组目录失败（HTTP {status}），请检查管理员会话"
+        )));
+    }
+    let bytes = response
+        .body
+        .collect(1024 * 1024)
+        .await
+        .map_err(|_| invalid("宿主分组目录响应超出限制或读取失败"))?;
+    let result: Envelope<T> =
+        serde_json::from_slice(&bytes).map_err(|_| invalid("宿主分组目录格式错误"))?;
+    if result.code != 200 || result.data.page.page != number || result.data.page.total_pages > 100 {
+        return Err(invalid("宿主分组目录分页异常，请刷新后重试"));
+    }
+    Ok(result.data)
+}
+
 async fn load(host: &HostClient, base: &str, cookie: Vec<u8>) -> Result<Vec<Group>, PluginFault> {
     let mut groups = vec![];
     let mut indexes = BTreeMap::new();
-    for page in 1..=100 {
-        let mut response = host
-            .http(
-                HttpRequest {
-                    method: "GET".into(),
-                    url: format!(
-                        "{base}/api/admin/account-groups/options?page={page}&pageSize=100"
-                    ),
-                    headers: vec![
-                        ("Cookie".into(), cookie.clone()),
-                        ("Accept".into(), b"application/json".to_vec()),
-                    ],
-                },
-                vec![],
-            )
-            .await
-            .map_err(|_| invalid("无法连接宿主分组目录，请检查插件设置中的宿主管理地址"))?;
-        if response.status != 200 {
-            let status = response.status;
-            let _ = response.body.close().await;
-            return Err(invalid(format!(
-                "读取宿主分组目录失败（HTTP {status}），请检查管理员会话"
-            )));
-        }
-        let bytes = response
-            .body
-            .collect(256 * 1024)
-            .await
-            .map_err(|_| invalid("宿主分组目录响应超出限制或读取失败"))?;
-        let result: Envelope =
-            serde_json::from_slice(&bytes).map_err(|_| invalid("宿主分组目录格式错误"))?;
-        if result.code != 200 || result.data.page.page != page || result.data.page.total_pages > 100
-        {
-            return Err(invalid("宿主分组目录分页异常，请刷新后重试"));
-        }
-        for mut group in result.data.items {
+    for number in 1..=100 {
+        let result: ListPage<Group> = page(
+            host,
+            base,
+            &format!("/api/admin/account-groups/options?page={number}&pageSize=100"),
+            number,
+            &cookie,
+        )
+        .await?;
+        for mut group in result.items {
             if group.id.is_empty() || indexes.insert(group.id.clone(), groups.len()).is_some() {
                 return Err(invalid("宿主分组目录已变化，请刷新后重试"));
             }
             group.account_ids.clear();
             groups.push(group);
         }
-        if page >= result.data.page.total_pages {
+        if number >= result.page.total_pages {
             break;
         }
     }
@@ -140,41 +167,39 @@ async fn load(host: &HostClient, base: &str, cookie: Vec<u8>) -> Result<Vec<Grou
         enabled: true,
         account_ids: vec![],
     });
-    let mut cursor = None;
-    let mut cursors = BTreeSet::new();
     let mut seen = BTreeSet::new();
-    for _ in 0..100 {
-        let page = host
-            .account_facts(AccountFactsQuery {
-                provider_id: Some("openai".into()),
-                cursor,
-                limit: 100,
-            })
-            .await?;
-        for account in page.accounts {
-            if !account.enabled
-                || account.provider_id != "openai"
-                || !seen.insert(account.account_id.clone())
+    for number in 1..=100 {
+        let result: ListPage<Account> = page(
+            host,
+            base,
+            &format!("/api/admin/accounts?page={number}&pageSize=100&provider=openai"),
+            number,
+            &cookie,
+        )
+        .await?;
+        for account in result.items {
+            if !account.enabled || account.provider != "openai" || !seen.insert(account.id.clone())
             {
                 continue;
             }
-            if account.group_ids.is_empty() {
-                groups[ungrouped].account_ids.push(account.account_id);
+            if account.groups.is_empty() {
+                groups[ungrouped].account_ids.push(account.id);
             } else {
-                for id in account.group_ids.into_iter().collect::<BTreeSet<_>>() {
+                for id in account
+                    .groups
+                    .into_iter()
+                    .map(|group| group.id)
+                    .collect::<BTreeSet<_>>()
+                {
                     let index = indexes
                         .get(&id)
                         .ok_or_else(|| invalid("账号分组已变化，请刷新后重试"))?;
-                    groups[*index].account_ids.push(account.account_id.clone());
+                    groups[*index].account_ids.push(account.id.clone());
                 }
             }
         }
-        cursor = page.next_cursor;
-        let Some(next) = &cursor else {
+        if number >= result.page.total_pages {
             return Ok(groups);
-        };
-        if !cursors.insert(next.clone()) {
-            return Err(invalid("账号分组分页重复，请重试"));
         }
     }
     Err(invalid("账号分组分页超过 100 页"))
